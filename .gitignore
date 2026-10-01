@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+# Generated data and run artifacts belong to later setup/run phases.
+models/
+runs/
+.env
+.env.*
+!.env.example

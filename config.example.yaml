@@ -1,0 +1,28 @@
+# The inspector reads this full configuration without downloads or agent calls.
+# Replace the dataset and agent-model placeholders when their later phases need them.
+dataset: YOUR_ORG/YOUR_DATASET
+gpus: all
+
+tasks:
+  models: [Qwen3.6-35B-A3B]
+  workloads: [S-1]
+  types: [SOTA]
+
+# Optional for Phase 1 inspection. Values are passed to the later Harbor adapter.
+agent:
+  name: codex
+  model: YOUR_AGENT_MODEL
+  kwargs: {}
+  auth: login
+  env: []
+  budget: 2h
+
+search:
+  mode: combined
+  auth: login
+
+evaluation:
+  install_timeout: 4h
+  health_timeout: 1h
+
+out: runs

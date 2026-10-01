@@ -1,0 +1,238 @@
+{
+  "apis": {
+    "openai-chat": {
+      "endpoint": "/v1/chat/completions",
+      "stream": {
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        }
+      },
+      "max_tokens": "max_tokens",
+      "output_count": "usage.completion_tokens",
+      "force": {
+        "ignore_eos": true
+      }
+    },
+    "ollama-chat": {
+      "endpoint": "/api/chat",
+      "stream": {
+        "stream": true
+      },
+      "max_tokens": "options.num_predict",
+      "output_count": "eval_count",
+      "force": {}
+    }
+  },
+  "baselines": {
+    "candidate": {
+      "api": "openai-chat",
+      "status": "authored-policy",
+      "note": "Authored evaluator request policy. Engine compatibility is accepted in Phase 6."
+    },
+    "freetoken": {
+      "api": "openai-chat",
+      "status": "authored-unverified",
+      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+    },
+    "llama.cpp": {
+      "api": "openai-chat",
+      "status": "authored-unverified",
+      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+    },
+    "ktransformers": {
+      "api": "openai-chat",
+      "status": "authored-unverified",
+      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+    },
+    "ktransformers-dsv4": {
+      "api": "openai-chat",
+      "status": "authored-unverified",
+      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+    },
+    "ollama": {
+      "api": "ollama-chat",
+      "status": "unsupported-agentic",
+      "note": "Native Ollama has no ignore_eos or full chat_template_kwargs pass-through. Exact agentic count and full template-policy compatibility remain unsupported."
+    },
+    "mlx-serve": {
+      "api": "openai-chat",
+      "status": "planned",
+      "note": "No supplied category installation script yet; retained as catalog intent."
+    },
+    "lm-studio": {
+      "api": "openai-chat",
+      "status": "planned",
+      "note": "No supplied category installation script yet; retained as catalog intent."
+    }
+  },
+  "models": {
+    "Qwen3.8-Flash-Next": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium",
+          "preserve_thinking": true
+        }
+      },
+      "sampling": {
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      },
+      "baselines": [
+        "candidate",
+        "freetoken",
+        "llama.cpp",
+        "ollama",
+        "lm-studio",
+        "mlx-serve"
+      ]
+    },
+    "GLM-5.3-Flash": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "reasoning_effort": "high",
+          "clear_thinking": false
+        }
+      },
+      "sampling": {
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      },
+      "baselines": [
+        "candidate",
+        "freetoken",
+        "ktransformers",
+        "mlx-serve"
+      ]
+    },
+    "DeepSeek-V4-Flash-0731": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "thinking_mode": "thinking",
+          "reasoning_effort": "high"
+        }
+      },
+      "sampling": {
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 1.0
+      },
+      "baselines": [
+        "candidate",
+        "freetoken",
+        "ktransformers-dsv4",
+        "llama.cpp",
+        "lm-studio",
+        "mlx-serve"
+      ],
+      "sampling_agentic": {
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      }
+    },
+    "DeepSeek-V4.1-Flash": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "thinking_mode": "thinking",
+          "reasoning_effort": 75
+        }
+      },
+      "sampling": {
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      },
+      "baselines": [
+        "candidate",
+        "mlx-serve"
+      ]
+    },
+    "MiniMax-M3": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "thinking_mode": "adaptive"
+        }
+      },
+      "sampling": {
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      },
+      "baselines": [
+        "candidate",
+        "freetoken"
+      ]
+    },
+    "Qwen3.8-27B": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium",
+          "preserve_thinking": true
+        }
+      },
+      "sampling": {
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      },
+      "baselines": [
+        "candidate",
+        "freetoken",
+        "llama.cpp",
+        "ollama",
+        "lm-studio",
+        "mlx-serve"
+      ]
+    },
+    "Qwen3.6-35B-A3B": {
+      "thinking": {
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        }
+      },
+      "sampling": {
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "frequency_penalty": 0.0,
+        "temperature": 1.0,
+        "top_p": 0.95
+      },
+      "baselines": [
+        "candidate",
+        "freetoken",
+        "llama.cpp",
+        "ollama",
+        "lm-studio",
+        "mlx-serve"
+      ]
+    }
+  }
+}

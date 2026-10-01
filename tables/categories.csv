@@ -1,0 +1,6 @@
+category,detection_rule,examples,status
+nvidia-cuda-x86,NVIDIA GPU visible to the driver and an x86_64 host,"RTX 4060 / 4090 / 5090, RTX PRO 6000, L40",initial-target
+nvidia-cuda-arm-unified,NVIDIA GPU and an aarch64 host with unified memory,DGX Spark (GB10),planned
+amd-rocm-x86,AMD discrete GPU exposed through ROCm/HIP and an x86_64 host,"Radeon RX 7900 XTX, Radeon AI PRO R9700",planned
+amd-apu-unified,AMD APU reporting gfx1151,Ryzen AI Max+ 395 (Strix Halo),planned
+apple-silicon,macOS on arm64,"Mac Studio M4 Max, any M-series Mac",planned

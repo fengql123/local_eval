@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-eval"
+version = "0.1.0"
+description = "Foundations for evaluating locally implemented model serving systems"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0.2,<7"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["eval"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"tables" = "eval/_tables"
+
+[tool.hatch.build.targets.sdist]
+include = ["eval", "images", "tables", "tests", "docs", "examples", "README.md", "CONTRIBUTING.md", "config.example.yaml", "pyproject.toml", "uv.lock"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

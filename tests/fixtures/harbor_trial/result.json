@@ -1,0 +1,19 @@
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "task_name": "qwen36-35b-a3b_S-1",
+  "trial_name": "fixture-attempt-1",
+  "agent_info": {
+    "name": "codex",
+    "version": "fixture",
+    "model_info": {
+      "name": "fixture-coding-model",
+      "provider": "fixture"
+    }
+  },
+  "agent_result": {
+    "n_input_tokens": 100,
+    "n_cache_tokens": 40,
+    "n_output_tokens": 10,
+    "cost_usd": null
+  }
+}
