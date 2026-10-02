@@ -1,1 +1,1 @@
-"""Local serving benchmark foundations; orchestration is implemented in later phases."""
+"""Local serving benchmark foundations, host preparation, and Harbor orchestration."""

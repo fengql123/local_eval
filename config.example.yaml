@@ -1,5 +1,5 @@
 # The inspector reads this full configuration without downloads or agent calls.
-# Replace the dataset and agent-model placeholders when their later phases need them.
+# Replace the dataset and, if supplied, agent-model placeholders before a run.
 dataset: YOUR_ORG/YOUR_DATASET
 gpus: all
 
@@ -8,9 +8,10 @@ tasks:
   workloads: [S-1]
   types: [SOTA]
 
-# Optional for Phase 1 inspection. Values are passed to the later Harbor adapter.
+# Optional for foundation inspection, required for eval.run; coding adapter.
 agent:
-  name: codex
+  name: codex  # Harbor built-in name or importable module.path:ClassName.
+  # Optional: omit for an adapter default or a harness that manages its own models.
   model: YOUR_AGENT_MODEL
   kwargs: {}
   auth: login
@@ -19,7 +20,15 @@ agent:
 
 search:
   mode: combined
-  auth: login
+  # Reference search also uses Harbor's built-in/custom adapter format.
+  agent:
+    name: claude-code
+    # Optional; the selected adapter owns its model/default requirements.
+    model: YOUR_SEARCH_MODEL
+    kwargs: {}
+    auth: login
+    env: []
+    budget: 2h
 
 evaluation:
   install_timeout: 4h

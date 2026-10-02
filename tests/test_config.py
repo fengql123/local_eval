@@ -9,6 +9,8 @@ def test_task_filters_select_their_intersection():
         ("qwen36-35b-a3b_S-1", "Qwen3.6-35B-A3B")
     ]
     assert QUALITY_SUBSET == 24
+    assert config.search.agent.name == "claude-code"
+    assert config.search.agent.model is None
 
 
 def test_load_config_resolves_all_authored_settings_without_side_effects(tmp_path):
@@ -27,7 +29,14 @@ agent:
   auth: api_key
   env: [CUSTOM_API_KEY]
   budget: 30m
-search: {mode: single, auth: api_key}
+search:
+  mode: single
+  agent:
+    name: harbor.agents.nop:NopAgent
+    kwargs: {test_option: enabled}
+    auth: api_key
+    env: [SEARCH_CREDENTIAL]
+    budget: 45m
 evaluation: {install_timeout: 90, health_timeout: 5m}
 out: results
 """
@@ -42,15 +51,25 @@ out: results
     assert config.agent.auth == "api_key"
     assert config.agent.env == ("CUSTOM_API_KEY",)
     assert config.agent.budget_seconds == 1800
-    assert (config.search.mode, config.search.auth) == ("single", "api_key")
+    assert config.search.mode == "single"
+    assert config.search.agent.name == "harbor.agents.nop:NopAgent"
+    assert config.search.agent.model is None
+    assert config.search.agent.kwargs == {"test_option": "enabled"}
+    assert config.search.agent.auth == "api_key"
+    assert config.search.agent.env == ("SEARCH_CREDENTIAL",)
+    assert config.search.agent.budget_seconds == 2700
     assert config.evaluation.install_timeout_seconds == 90
     assert config.evaluation.health_timeout_seconds == 300
     assert config.out == tmp_path / "results"
     assert not config.out.exists()
+    custom = parse_config({"agent": {"name": "harbor.agents.nop:NopAgent"}})
+    assert custom.agent.name == "harbor.agents.nop:NopAgent"
+    assert custom.agent.model is None
+    assert parse_config({"agent": {"name": "codex", "model": None}}).agent.model is None
 
 
 def test_unknown_config_field_is_rejected():
-    with pytest.raises(ValueError, match="unknown tasks field.*ids"):
+    with pytest.raises(TypeError, match="ids"):
         parse_config({"tasks": {"ids": ["qwen36-35b-a3b_A-N"]}})
 
 

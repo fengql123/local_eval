@@ -1,121 +1,114 @@
 # Foundation reference
 
-Phase 1 exposes six small areas. These functions read local settings/catalogs or
-process explicit evidence; they do not download datasets, build images, start
-servers, or run agents. `examples/inspect_foundations.py` exercises the real
-configuration → task → baseline metadata → request-policy path.
+The six foundation areas read local settings/catalogs or process explicit
+execution evidence. They need no dataset download, image build, server, or agent
+call. Phase 2 composes them into setup, generated Harbor tasks, and run/resume.
+The examples below were executed against this checkout and its checked-in test
+fixtures. They inspect policy or arithmetic; they are not measured GPU results.
 
 ## Configuration — `eval/config.py`
 
-`load_config(path)` parses YAML into dataclasses. `parse_config(mapping, base=...)`
-validates the same input in memory. `select_tasks(config.tasks)` intersects model,
-workload, and type filters in catalog order. Model aliases become canonical names;
-relative output paths resolve beside the YAML file. Unknown settings and empty
-task selections fail clearly. The complete setting/default list is in the README.
+`load_config(path)` reads YAML; `parse_config(mapping, base=...)` maps the same
+settings into dataclasses. Model aliases become canonical names, and relative
+output paths resolve beside the YAML file. `select_tasks()` intersects model,
+workload, and type filters in task-table order. An empty task intersection is an
+error. Inputs are trusted: native parsing/dataclass errors propagate without a
+separate schema audit. The README lists all fields and defaults.
 
 ```python
 from eval.config import load_config, select_tasks
 
 config = load_config("config.example.yaml")
-tasks = select_tasks(config.tasks)
-assert [task.task_id for task in tasks] == ["qwen36-35b-a3b_S-1"]
+selected = select_tasks(config.tasks)
+assert [task.task_id for task in selected] == ["qwen36-35b-a3b_S-1"]
 ```
 
-This reads the checked-in example and actual task catalog. Phase 2 will use the
-same task selection to generate Harbor tasks. No dataset is accessed here.
+This is the actual example configuration and task catalog. Selection does not
+read the dataset. Both `agent.name` and `search.agent.name` use Harbor's built-in
+names or importable `module.path:ClassName` paths. A role's omitted/null model
+means no model override; its selected adapter owns model and authentication
+requirements. The generated task has separate search and coding steps.
 
-## Baseline metadata — `eval/baselines.py`
+## Baseline checkpoints — `eval/baselines.py`
 
-`recipe(engine, category)` resolves repository, source ref, prefix, installer path,
-and launch metadata. `mapping(category, model, engine)` selects checkpoint format;
-`needed(category, models)` returns the deduplicated engine union. `validate_catalog()`
-checks our authored table links; it does not audit the owner's dataset.
-
-Installation logic belongs to `images/<category>/baselines/<engine>/install.sh`.
-The category Dockerfile includes the evaluator and separate baseline venvs/native
-prefixes. Phase 1 resolves metadata without requiring the pending source assets
-to exist. Setup will check those inputs when a real build needs them.
+`mappings(category, model)` selects rows from `baseline_map.csv`.
+`mapping(category, model, engine)` selects one engine's row. `needed()` returns
+engine names once, in selected-model/table order. This is the minimum join needed
+to prepare checkpoint packages and select fixed-path installers.
 
 ```python
-from pathlib import Path
-from eval.baselines import recipe
+from eval.baselines import mapping, needed
 
-engine = recipe("freetoken", "nvidia-cuda-x86")
-assert engine.code_ref == "v0.1.3"
-assert engine.install_script == Path("images/nvidia-cuda-x86/baselines/freetoken/install.sh")
-launch = engine.launch("/models/checkpoint", 8000, args=("--max-model-len", "4096"))
-assert launch.argv[-2:] == ("--max-model-len", "4096")
+asset = mapping("nvidia-cuda-x86", "C2", "freetoken")
+assert asset.source_model_checkpoint == "Qwen/Qwen3.6-35B-A3B"
+assert asset.checkpoint == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+assert needed("nvidia-cuda-x86", ("C2", "C1")) == ("freetoken", "llama.cpp", "ollama")
 ```
 
-This uses the same catalog row as the executable inspector and baseline test.
-`launch()` composes argv without executing a shell; arguments and environment
-overrides are unrestricted. The defaults are a starting point for tuning.
-Engine refs identify source code; serving checkpoints are acquired later using
-model strings without added model revision pins. `pending-assets` means launch
-metadata exists but image/installer contents are pending; `planned` means the
-launch metadata itself is not implemented.
+These are the inspector's real mapping and the baseline tests' shared-engine
+selection. Installer paths are inferred as
+`images/<category>/baselines/<engine>/install.sh`. Scripts own repository/ref,
+prefix, and venv/native isolation. There is no launch recipe or metadata audit.
+An unmatched device/model selection yields no mappings; a missing individual
+mapping raises Python's normal `StopIteration`.
 
 ## Device inspection — `eval/device.py`
 
-`inspect_machine(gpu_ids)` measures CPU/RAM and selected NVIDIA GPU identities and
-memory. Indices/UUIDs are passed to the probe before parsing, so an unrelated bad
-GPU does not block a selected healthy one. `machine.dockerfile` maps its category
-directly to `images/<category>/Dockerfile`. There is no CUDA toolchain policy or
-Dockerfile-generation layer. `check_environment()` probes Docker daemon access,
-Compose, and Harbor versions without starting a task.
-
-On an actual supported GPU host:
+`inspect_machine(gpu_ids)` reads selected NVIDIA GPU identities/memory and host
+CPU/RAM. The category directly determines `machine.dockerfile`; no Dockerfile is
+generated. `check_environment()` performs bounded Docker daemon, Compose, and
+Harbor version probes. Command failures propagate from the subprocess API;
+unsupported hosts remain an explicit capability error.
 
 ```python
-from eval.config import load_config
-from eval.device import inspect_machine
+from eval.device import Machine, parse_nvidia, select_gpus
 
-config = load_config("config.example.yaml")
-machine = inspect_machine(config.gpus)
-print(machine.dockerfile, [gpu.uuid for gpu in machine.gpus])
+gpus = parse_nvidia("0, GPU-fixture, Fixture GPU, 81920")
+selected = select_gpus(gpus, ("GPU-fixture",))
+machine = Machine("Linux", "x86_64", 8, 32 * 2**30, selected)
+assert str(machine.dockerfile) == "images/nvidia-cuda-x86/Dockerfile"
+assert machine.gpus[0].memory_gib == 80
 ```
 
-This requires the NVIDIA driver. Phase 1's CPU tests inject saved probe outputs;
-they do not claim a real GPU/container check. Inspection currently supports Linux
-NVIDIA x86. Other category image paths remain part of the source design; device
-probes and accelerator acceptance are added when those categories are implemented.
+This explicitly supplied probe fixture demonstrates the path mapping without
+claiming a physical GPU inspection. CPU tests also inject environment-command
+outputs. Actual inspection currently supports Linux NVIDIA x86; other category
+probes and acceptance tests are future work.
 
-## Evaluator request formatting — `eval/tables.py`
+## Request policy — `eval/request_policy.py`
 
-`request_fields(model, engine)` reads the shared API/model policy. `policy.request()`
-formats recorded messages/tools with streaming, sampling, thinking, and output
-fields without mutating the caller's data. `policy.count(event)` reads the final
-server-reported output counter. This is evaluator request construction, not a
-restriction on the agent's serving-system implementation or tuning.
+`request_fields(model, engine)` joins model thinking/sampling policy and backend
+fields from `request_fields.json`. `policy.request()` builds a comparison request
+without changing recorded messages or tools. `policy.count(event)` reads
+`usage.completion_tokens` and returns `None` when a stream event has no usage.
+Every backend defined in `request_fields.json` uses `/v1/chat/completions`;
+Ollama's extra fields come from that policy. The four LM Studio mappings belong to
+the future Apple Silicon category and have no request policy yet.
 
 ```python
-from eval.config import OUTPUT_ALLOWANCE
-from eval.tables import request_fields
+from eval.request_policy import request_fields
 
-policy = request_fields("C2", "freetoken")
-body = policy.request(
-    [{"role": "user", "content": "Explain caching."}],
-    workload="S-1",
-    output_limit=OUTPUT_ALLOWANCE,
-)
-assert body["stream"] is True
-assert body["max_tokens"] == 32768
+policy = request_fields("C2", "ollama")
+body = policy.request([], workload="A-N", output_limit=12, served_model="baseline")
+assert policy.endpoint == "/v1/chat/completions"
+assert body["max_tokens"] == 12
+assert body["ignore_eos"] is True
+assert body["think"] is True
+assert policy.count({"usage": {"completion_tokens": 12}}) == 12
 ```
 
-The inspector uses this policy for its selected task; later clients provide the
-actual recorded messages and tools. This example constructs a body without making
-a request. Native Ollama uses `/api/chat`, `think`, and nested `options`; its current
-policy cannot enforce agentic exact output counts and reports that limitation
-explicitly. `contract.py`, captured-help parsing, and tuning/env allowlists are gone.
+These assertions are also used in request-policy tests. S requests permit early
+stopping; agentic requests apply the recorded output limit and the authored
+forced-length fields. This module constructs requests, not server launch commands
+or an agent tuning allowlist. Engine support is verified when servers are added.
 
 ## Timing — `eval/bench/metrics.py`
 
-`numbers(workload, records)` calculates throughput, busy throughput, mean TTFT,
-and explicit validity. It merges overlapping intervals so concurrent streams share
-one elapsed-time denominator. Records use monotonic timestamps and server-reported
-output counts. Startup, warmup, and quality inputs stay outside timed records.
-Malformed/failed evidence invalidates the whole score. This module never grades
-answers and needs no HTTP client or replay runner.
+`numbers(workload, records)` computes generation throughput, busy throughput,
+mean TTFT, and score validity. Overlapping intervals count once. It consumes
+monotonic timestamps and server-reported counts directly, without an extra
+shape/type validation layer. Failed requests or zero timing duration invalidate
+the run's score. Replay owns stream checks; the judge owns answer grading.
 
 ```python
 from eval.bench.metrics import numbers
@@ -132,18 +125,18 @@ assert report["throughput"] == 7.5
 assert report["ttft_mean"] == 1
 ```
 
-These are the hand-calculated inputs from the overlapping-request test. They
-exercise the implemented arithmetic, not a measured serving performance claim.
+This is the executed overlapping-request arithmetic fixture. The decode union is
+`[1, 5]`, so 30 tokens across four seconds means 7.5 tokens/s. Startup, quality,
+warmup, and idle tool delays are outside the supplied timing records.
 
 ## Implementation costs — `eval/costs.py`
 
-`collect_trial(directory)` reads finalized Harbor usage. `from_harbor_result()`
-accepts the same evidence in memory. `merge_attempts()` deduplicates repeated
-collection while retaining distinct retries; `update_ledger()` saves them atomically.
-`summarize()` reports coding-agent/harness tokens and known/unknown costs.
-Serving-output counts never enter implementation costs. Cache is a subset of
-input, so input 100/cache 40/output 10 means 110 total tokens. Estimates require
-explicit `TokenPrices`; no pricing service or paid call happens here.
+`collect_trial()` reads finalized Harbor evidence. `from_harbor_result()` accepts
+it in memory. `merge_attempts()` deduplicates the same immutable attempt while
+retaining retries; `update_ledger()` persists the attempt ledger.
+`summarize()` separates reported, explicitly estimated, and unknown costs.
+Serving-output tokens do not enter this ledger. Cached input is a subset of
+input; an explicit rate table is needed for a local estimate.
 
 ```python
 from eval.costs import collect_trial, merge_attempts, summarize
@@ -155,7 +148,23 @@ assert report["total_tokens"] == 110
 assert report["cost_usd"] is None
 ```
 
-The checked-in synthetic Harbor fixture is consumed by the cost test too. Missing
-USD cost stays unknown. Later foreground orchestration owns ledger writes and
-collects finalized attempts before deleting disposable trial folders. Search and
-judge usage remain separate roles; none of that orchestration is implemented here.
+The checked-in synthetic Harbor fixture reports input 100, cache 40, output 10:
+110 total tokens. Missing cost stays unknown. A finalized attempt ID cannot be
+reused with changed evidence. The foreground runner writes the ledger before
+cancelled-trial cleanup and during finalization. Malformed files/structures fail
+at their native reader. Search-agent billing is not recorded; only coding-step
+usage enters the implementation ledger.
+
+## Phase 2 composition
+
+The [Phase 2 review packet](phase-02.md) explains `models.py`, `tasks.py`,
+`setup.py`, and `run.py`. Normal `hf download --local-dir` commands acquire
+the source checkpoint. Setup serializes trusted prepared rows unchanged and
+samples one private-S calibration view per model for every workload. A baseline
+matching the original uses `/models/source`; distinct baseline checkpoints remain
+model identifiers for container runtime acquisition. Generated `run.md` lists
+the source path and baseline identifiers. Task rendering defines one
+shared sandbox; the foreground wrapper saves configuration and delegates to
+Harbor. Native search/coding task configuration is implemented; the small
+`eval.agents:PhasedAgent` coordinator and search operations are Phase 5 work.
+Servers, replay and judging remain their own later implementation phases.

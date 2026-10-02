@@ -1,0 +1,21 @@
+# Only benchmark code, its catalog and supplied image sources enter image builds.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!eval/
+!eval/**/
+!eval/**/*.py
+!tables/
+!tables/*.csv
+!tables/*.json
+!templates/
+!templates/*.j2
+!templates/*.sh
+!templates/*.md
+!images/
+!images/*/
+!images/*/Dockerfile
+!images/*/baselines/
+!images/*/baselines/*/
+!images/*/baselines/*/install.sh

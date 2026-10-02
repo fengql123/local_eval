@@ -2,90 +2,99 @@
 
 ## Status and scope
 
-**Revised after owner feedback; uncommitted and awaiting review.** Phase 1 now
-contains six foundation areas. It performs no downloads, engine/image builds,
-server launches, agent calls, replay, judging, or run orchestration.
+**Phase 1 was reviewed and committed as `af52a39`.** It introduced six foundation
+areas without dataset/model acquisition, image builds, server launches, agent
+calls, replay, judging, or run orchestration. The current checkout also contains
+approved Phase 2 and the owner's simplification feedback. This packet describes
+the current foundation APIs; the original commit remains unchanged.
 
-| Read order | File | Responsibility |
+| Read order | Files | Responsibility |
 | --- | --- | --- |
-| 1 | `README.md`, `config.example.yaml` | All config fields/defaults, working inspection, and new image structure |
-| 2 | `eval/config.py`, `tables/tasks.csv` | Validated settings and model/workload/type task selection |
-| 3 | `images/README.md`, `tables/categories.csv`, `tables/baselines.csv`, `tables/baseline_map.csv` | Supplied category images/installers and source/checkpoint/launch metadata |
-| 4 | `eval/baselines.py` | Installer paths and unrestricted argv/env composition; no install generation |
-| 5 | `eval/device.py` | Selected GPU/resource evidence and direct category Dockerfile path |
-| 6 | `tables/request_fields.json`, `eval/tables.py` | Evaluator request formatting and output counters; no agent tuning policy |
-| 7 | `eval/bench/metrics.py` | Timing interval unions, throughput, TTFT and invalid evidence |
-| 8 | `eval/costs.py` | Coding-agent/harness usage and attempt ledger |
-| 9 | `examples/inspect_foundations.py`, `tests/` | Actual catalog inspection and four cases per foundation area |
+| 1 | `README.md`, `config.example.yaml` | Configuration, commands, defaults, and review status |
+| 2 | `eval/config.py`, `tables/tasks.csv` | Settings and model/workload/type selection |
+| 3 | `images/README.md`, `tables/baseline_map.csv` | Fixed image/installer paths and source/baseline checkpoints |
+| 4 | `eval/baselines.py` | Checkpoint selection and engine-name deduplication |
+| 5 | `eval/device.py` | GPU/resource evidence and direct category Dockerfile path |
+| 6 | `tables/request_fields.json`, `eval/request_policy.py` | Comparison requests and server output counters |
+| 7 | `eval/bench/metrics.py` | Timing unions, throughput, TTFT, and score validity |
+| 8 | `eval/costs.py` | Implementation usage and immutable attempt ledger |
+| 9 | `examples/inspect_foundations.py`, matching tests | Executed inspection and four cases per foundation area |
 
-## Feedback addressed
+## Current architecture
 
-1. Removed `QUALITY_BATCH`. The future quality gate submits its S subset as an
-   offline workload; the serving backend owns batching/scheduling.
-2. The README lists every accepted config field, its default, and its purpose;
-   the example YAML includes all sections.
-3. Baselines reference `images/<category>/baselines/<engine>/install.sh` with
-   catalog repository/ref/prefix. Inline installation, clone-command generation,
-   and toolkit recipes are removed.
-4. Device inspection exposes `machine.dockerfile`. Generated-image parameters,
-   CUDA toolkit selection, compile architectures, and driver-floor policy are removed.
-5. Deleted `eval/search/contract.py` and its allowlists/help parsing. Baseline
-   argv/env overrides are unrestricted; only officially documented Ollama bind
-   and model-directory defaults remain. Evaluator request formatting is retained.
-6. Deleted shared HTTP test infrastructure and future-only package markers.
-   Tests cover implemented Phase 1 code only: two common and two edge cases
-   per area, with no parameter matrices.
+- Only `tasks.csv`, `baseline_map.csv`, and `request_fields.json` are catalogs.
+  Install scripts own cloning, refs, install prefixes, and isolation; their paths
+  follow `images/<category>/baselines/<engine>/install.sh`.
+- `baseline_map.csv` supplies the original checkpoint plus each engine's baseline
+  checkpoint. Setup exposes both to the agent, which may quantize the source.
+  Matching identifiers share files; generated `run.md` supplies actual paths.
+- `request_policy.py` formats requests for the candidate and engines defined in
+  `request_fields.json` using the authored OpenAI endpoint policy. The future
+  Apple Silicon LM Studio mappings have no policy yet. No agent tuning or launch
+  environment rules are imposed.
+- Configuration, catalog, file, and evidence parsing use their ordinary native
+  errors. There is no duplicate schema audit or defensive recovery layer.
+- Quality uses a fixed S subset as an offline workload. The backend owns batching;
+  there is no quality batch-size setting.
+- Tests cover implemented behavior only, with two common and two edge cases per
+  area. Shared HTTP infrastructure arrives with the later HTTP implementation.
 
-## Focused checks
+## Focused foundation checks
 
 | Area | Common case 1 | Common case 2 | Edge case 1 | Edge case 2 |
 | --- | --- | --- | --- | --- |
-| Config | Task-filter intersection | Complete YAML with relative output | Unknown field | Empty task intersection |
-| Request tables | OpenAI fields/recorded-input preservation | Native Ollama fields/counter | Unsupported exact agentic output | Invalid output limit |
-| Baselines | Catalog links and engine union | Unrestricted argv/env composition | Missing model mapping | Planned launch metadata |
-| Device | Selected GPU and Dockerfile path | Environment availability probes | Unknown GPU | Unsupported host |
-| Metrics | Overlapping timings | Serial timings without idle gaps | Partial request failure | Zero decode window |
-| Costs | Saved usage/cache subset | Explicit estimate/ledger round trip | Duplicate collection and retry | Invalid cache count |
+| Config | Task-filter intersection | Complete YAML and relative output | Unknown field raises native TypeError | Empty task intersection |
+| Request policy | Candidate OpenAI policy | Ollama backend fields | Absent/zero stream usage and agentic sampling | Recorded inputs remain unchanged |
+| Baselines | Original/baseline checkpoint mapping | Shared-engine deduplication | Category without rows | Model without category mapping |
+| Device | Selected GPU and Dockerfile path | Environment probes | Unknown GPU | Unsupported host |
+| Metrics | Overlapping timings | Serial timings | Failed request invalidates run | Zero decode duration |
+| Costs | Cache counted once and unknown cost | Explicit estimate and ledger round trip | Duplicate collection and retry | Conflicting immutable attempt evidence |
 
-Run from the checkout:
+The current foundation suites contain 24 tests. Phase 2 adds four more areas,
+bringing the checkout to 40 tests. Run from the checkout:
 
 ```bash
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
 uv run python examples/inspect_foundations.py config.example.yaml
-uv build
 ```
 
-Validated with Python 3.12.14:
+All 40 tests passed after the simplification. Model/dataset acquisition and agent
+execution are substituted at their external boundary. Task-renderer checks use
+the real Harbor schema and Docker Compose parser, without an image build or
+running daemon. No paid agent call or physical GPU result is claimed.
 
-* **24 tests passed:** six areas with exactly four tests each, no parameter matrices.
-* Ruff lint and format checks passed.
-* The real example configuration/catalog inspection ran successfully and printed
-  the selected task, category Dockerfile/installer paths, launch argv and request fields.
-* The source distribution and wheel built successfully offline.
+## Executed inspection
 
-These checks exercise implemented foundations with local evidence. No network,
-dataset, GPU build, Harbor task, or model provider was used.
+```bash
+uv run python examples/inspect_foundations.py config.example.yaml
+```
 
-## Working inspection
+This reads the real example configuration and catalogs. It selected
+`qwen36-35b-a3b_S-1` and reported:
 
-The inspector selects the actual `qwen36-35b-a3b_S-1` catalog task. For its
-explicit NVIDIA x86 / FreeToken entry it reports source ref `v0.1.3`, prefix
-`/opt/baselines/freetoken`, category Dockerfile path, category installer path,
-launch argv, and evaluator request fields. This is metadata inspection, not a
-claim that an engine or Dockerfile has been built.
+```text
+Dockerfile: images/nvidia-cuda-x86/Dockerfile
+Installer:  images/nvidia-cuda-x86/baselines/freetoken/install.sh
+Source:     Qwen/Qwen3.6-35B-A3B
+Baseline:   nvidia/Qwen3.6-35B-A3B-NVFP4
+Request:    stream=true, include_usage=true, max_tokens=32768
+```
 
-## Limits and next phase
+These values are an excerpt from the inspector's JSON output. The category and
+engine are explicit example choices; this does not inspect the actual host or
+claim that the pending image/installer exists. The [foundation reference](reference.md)
+contains executed API examples and explains each module's job.
 
-Linux NVIDIA x86 is the implemented device-inspection path. Other category names
-are source-layout entries; their probes and accelerator acceptance remain later
-work. Production Dockerfile/installer contents are supplied by the owner. There
-is no generated substitute. Native Ollama's current policy cannot enforce exact
-agentic output counts. DeepSeek-V4.1-Flash has no usable NVIDIA model mapping.
+## Limits and Phase 2
 
-Phase 2 composes these APIs with supplied source images into host acquisition,
-generated Harbor tasks, UUID folders, and foreground folder-only resume. Its code
-and renderer tests use acquisition/source-asset fixtures. Real rows first arrive
-in Phase 3; the owner's dataset quality is trusted. HTTP/server test support is
-introduced alongside the actual HTTP/server code, not in Phase 1.
+Host inspection currently supports Linux NVIDIA x86. Other category paths specify
+the source layout; their probes and acceptance remain future work. Production
+Dockerfiles/installers await owner supply. DeepSeek-V4.1-Flash has no NVIDIA mapping
+in the current table.
+
+Phase 2 composes these foundations into host acquisition, shared-container Harbor
+tasks, UUID run folders, and foreground folder-only resume. Its code remains
+approved as one phase commit. Real owner-supplied rows are first needed for Phase 3;
+the dataset's quality is trusted. See [the Phase 2 packet](phase-02.md).

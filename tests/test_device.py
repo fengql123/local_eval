@@ -49,7 +49,7 @@ def test_environment_checks_daemon_and_tools_without_starting_containers():
 
 
 def test_unknown_gpu_does_not_fall_back_to_an_available_device():
-    with pytest.raises(DeviceError, match="unknown or ambiguous GPU selector"):
+    with pytest.raises(KeyError, match="99"):
         inspect_machine(
             ["99"],
             runner=lambda argv: "0, GPU-zero, NVIDIA L40, 46068",

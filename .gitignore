@@ -5,7 +5,7 @@ __pycache__/
 .ruff_cache/
 dist/
 *.egg-info/
-# Generated data and run artifacts belong to later setup/run phases.
+# Generated data and run artifacts never belong in source control.
 models/
 runs/
 .env

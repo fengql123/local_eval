@@ -1,54 +1,54 @@
-category,model,baseline,checkpoint_kind,checkpoint,file_pattern,default_args,default_env,doc
-nvidia-cuda-x86,Qwen3.8-Flash-Next,freetoken,hf,RadixArk/Qwen3.8-Flash-Next-NVFP4,,[],{},
-nvidia-cuda-x86,Qwen3.8-Flash-Next,llama.cpp,gguf,ggml-org/Qwen3.8-Flash-Next-GGUF,*Q8_0*.gguf,[],{},
-nvidia-cuda-x86,Qwen3.8-Flash-Next,ollama,ollama,qwen3.8-flash-next:125b-a6b-q4_K_M,,[],{},
-nvidia-cuda-x86,GLM-5.3-Flash,freetoken,hf,RedHatAI/GLM-5.3-Flash-NVFP4,,[],{},
-nvidia-cuda-x86,GLM-5.3-Flash,ktransformers,hf,zai-org/GLM-5.3-Flash,,"[""--kt-method"", ""FP8"", ""--kt-cpuinfer"", ""64"", ""--kt-threadpool-count"", ""2"", ""--kt-num-gpu-experts"", ""0"", ""--kt-gpu-prefill-token-threshold"", ""2048""]",{},https://github.com/kvcache-ai/ktransformers/blob/v0.7.1/doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md
-nvidia-cuda-x86,DeepSeek-V4-Flash-0731,freetoken,hf,deepseek-ai/DeepSeek-V4-Flash-0731,,[],{},
-nvidia-cuda-x86,DeepSeek-V4-Flash-0731,ktransformers-dsv4,hf,deepseek-ai/DeepSeek-V4-Flash-0731,,"[""--kt-method"", ""MXFP4""]",{},https://github.com/kvcache-ai/ktransformers/blob/v0.7.1/doc/en/DeepSeek-V4-Flash.md
-nvidia-cuda-x86,DeepSeek-V4-Flash-0731,llama.cpp,gguf,ggml-org/DeepSeek-V4-Flash-0731-GGUF,*MXFP4*.gguf,[],{},
-nvidia-cuda-x86,MiniMax-M3,freetoken,hf,nvidia/MiniMax-M3-NVFP4,,[],{},
-nvidia-cuda-x86,Qwen3.8-27B,freetoken,hf,RadixArk/Qwen3.8-27B-NVFP4,,[],{},
-nvidia-cuda-x86,Qwen3.8-27B,llama.cpp,gguf,ggml-org/Qwen3.8-27B-GGUF,*Q4_K_M*.gguf,[],{},
-nvidia-cuda-x86,Qwen3.8-27B,ollama,ollama,qwen3.8:27b-mtp-q4_K_M,,[],{},
-nvidia-cuda-x86,Qwen3.6-35B-A3B,freetoken,hf,nvidia/Qwen3.6-35B-A3B-NVFP4,,[],{},https://github.com/FlashML-org/FreeToken/blob/v0.1.3/docs/quickstart.md
-nvidia-cuda-x86,Qwen3.6-35B-A3B,llama.cpp,gguf,ggml-org/Qwen3.6-35B-A3B-GGUF,*Q4_K_M*.gguf,[],{},https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF
-nvidia-cuda-x86,Qwen3.6-35B-A3B,ollama,ollama,qwen3.6:35b-a3b-mtp-q4_K_M,,[],{},https://ollama.com/library/qwen3.6
-nvidia-cuda-arm-unified,Qwen3.8-Flash-Next,llama.cpp,gguf,ggml-org/Qwen3.8-Flash-Next-GGUF,*Q8_0*.gguf,[],{},
-nvidia-cuda-arm-unified,Qwen3.8-Flash-Next,ollama,ollama,qwen3.8-flash-next:125b-a6b-q4_K_M,,[],{},
-nvidia-cuda-arm-unified,DeepSeek-V4-Flash-0731,llama.cpp,gguf,ggml-org/DeepSeek-V4-Flash-0731-GGUF,*MXFP4*.gguf,[],{},
-nvidia-cuda-arm-unified,Qwen3.8-27B,llama.cpp,gguf,ggml-org/Qwen3.8-27B-GGUF,*Q4_K_M*.gguf,[],{},
-nvidia-cuda-arm-unified,Qwen3.8-27B,ollama,ollama,qwen3.8:27b-mtp-q4_K_M,,[],{},
-nvidia-cuda-arm-unified,Qwen3.6-35B-A3B,llama.cpp,gguf,ggml-org/Qwen3.6-35B-A3B-GGUF,*Q4_K_M*.gguf,[],{},https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF
-nvidia-cuda-arm-unified,Qwen3.6-35B-A3B,ollama,ollama,qwen3.6:35b-a3b-mtp-q4_K_M,,[],{},https://ollama.com/library/qwen3.6
-amd-rocm-x86,Qwen3.8-Flash-Next,llama.cpp,gguf,ggml-org/Qwen3.8-Flash-Next-GGUF,*Q8_0*.gguf,[],{},
-amd-rocm-x86,Qwen3.8-Flash-Next,ollama,ollama,qwen3.8-flash-next:125b-a6b-q4_K_M,,[],{},
-amd-rocm-x86,DeepSeek-V4-Flash-0731,llama.cpp,gguf,ggml-org/DeepSeek-V4-Flash-0731-GGUF,*MXFP4*.gguf,[],{},
-amd-rocm-x86,Qwen3.8-27B,llama.cpp,gguf,ggml-org/Qwen3.8-27B-GGUF,*Q4_K_M*.gguf,[],{},
-amd-rocm-x86,Qwen3.8-27B,ollama,ollama,qwen3.8:27b-mtp-q4_K_M,,[],{},
-amd-rocm-x86,Qwen3.6-35B-A3B,llama.cpp,gguf,ggml-org/Qwen3.6-35B-A3B-GGUF,*Q4_K_M*.gguf,[],{},https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF
-amd-rocm-x86,Qwen3.6-35B-A3B,ollama,ollama,qwen3.6:35b-a3b-mtp-q4_K_M,,[],{},https://ollama.com/library/qwen3.6
-amd-apu-unified,Qwen3.8-Flash-Next,llama.cpp,gguf,ggml-org/Qwen3.8-Flash-Next-GGUF,*Q8_0*.gguf,[],{},
-amd-apu-unified,Qwen3.8-Flash-Next,ollama,ollama,qwen3.8-flash-next:125b-a6b-q4_K_M,,[],{},
-amd-apu-unified,DeepSeek-V4-Flash-0731,llama.cpp,gguf,ggml-org/DeepSeek-V4-Flash-0731-GGUF,*MXFP4*.gguf,[],{},
-amd-apu-unified,Qwen3.8-27B,llama.cpp,gguf,ggml-org/Qwen3.8-27B-GGUF,*Q4_K_M*.gguf,[],{},
-amd-apu-unified,Qwen3.8-27B,ollama,ollama,qwen3.8:27b-mtp-q4_K_M,,[],{},
-amd-apu-unified,Qwen3.6-35B-A3B,llama.cpp,gguf,ggml-org/Qwen3.6-35B-A3B-GGUF,*Q4_K_M*.gguf,[],{},https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF
-amd-apu-unified,Qwen3.6-35B-A3B,ollama,ollama,qwen3.6:35b-a3b-mtp-q4_K_M,,[],{},https://ollama.com/library/qwen3.6
-apple-silicon,Qwen3.8-Flash-Next,llama.cpp,gguf,ggml-org/Qwen3.8-Flash-Next-GGUF,*Q8_0*.gguf,[],{},
-apple-silicon,Qwen3.8-Flash-Next,ollama,ollama,qwen3.8-flash-next:125b-mlx,,[],{},
-apple-silicon,Qwen3.8-Flash-Next,lm-studio,planned,lmstudio: qwen/qwen3.8-flash-next,,[],{},
-apple-silicon,Qwen3.8-Flash-Next,mlx-serve,hf,ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit,,[],{},
-apple-silicon,GLM-5.3-Flash,mlx-serve,gguf,antirez/glm-5.3-flash-gguf,*Q4_K*.gguf,[],{},
-apple-silicon,DeepSeek-V4-Flash-0731,llama.cpp,gguf,ggml-org/DeepSeek-V4-Flash-0731-GGUF,*MXFP4*.gguf,[],{},
-apple-silicon,DeepSeek-V4-Flash-0731,lm-studio,planned,lmstudio: deepseek/deepseek-v4-flash,,[],{},
-apple-silicon,DeepSeek-V4-Flash-0731,mlx-serve,hf,ddalcu/DeepSeek-V4-Flash-0731-iQ-MLX-3.3bpw,,[],{},
-apple-silicon,DeepSeek-V4.1-Flash,mlx-serve,gguf,antirez/deepseek-v4.1-flash-gguf,*Q2*.gguf,[],{},
-apple-silicon,Qwen3.8-27B,llama.cpp,gguf,ggml-org/Qwen3.8-27B-GGUF,*Q4_K_M*.gguf,[],{},
-apple-silicon,Qwen3.8-27B,ollama,ollama,qwen3.8:27b-mlx,,[],{},
-apple-silicon,Qwen3.8-27B,lm-studio,planned,lmstudio: qwen/qwen3.8-27b,,[],{},
-apple-silicon,Qwen3.8-27B,mlx-serve,hf,ddalcu/Qwen3.8-27B-MLX-Serve-4bit,,[],{},
-apple-silicon,Qwen3.6-35B-A3B,llama.cpp,gguf,ggml-org/Qwen3.6-35B-A3B-GGUF,*Q4_K_M*.gguf,[],{},https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF
-apple-silicon,Qwen3.6-35B-A3B,ollama,ollama,qwen3.6:35b-mlx,,[],{},https://ollama.com/library/qwen3.6
-apple-silicon,Qwen3.6-35B-A3B,lm-studio,planned,lmstudio: qwen/qwen3.6-35b-a3b,,[],{},
-apple-silicon,Qwen3.6-35B-A3B,mlx-serve,hf,ddalcu/Qwen3.6-35B-A3B-MLX-Serve-4bit,,[],{},
+category,model,baseline,source_model_checkpoint,checkpoint
+nvidia-cuda-x86,Qwen3.8-Flash-Next,freetoken,Qwen/Qwen3.8-Flash-Next,RadixArk/Qwen3.8-Flash-Next-NVFP4
+nvidia-cuda-x86,Qwen3.8-Flash-Next,llama.cpp,Qwen/Qwen3.8-Flash-Next,ggml-org/Qwen3.8-Flash-Next-GGUF
+nvidia-cuda-x86,Qwen3.8-Flash-Next,ollama,Qwen/Qwen3.8-Flash-Next,qwen3.8-flash-next:125b-a6b-q4_K_M
+nvidia-cuda-x86,GLM-5.3-Flash,freetoken,zai-org/GLM-5.3-Flash,RedHatAI/GLM-5.3-Flash-NVFP4
+nvidia-cuda-x86,GLM-5.3-Flash,ktransformers,zai-org/GLM-5.3-Flash,zai-org/GLM-5.3-Flash
+nvidia-cuda-x86,DeepSeek-V4-Flash-0731,freetoken,deepseek-ai/DeepSeek-V4-Flash-0731,deepseek-ai/DeepSeek-V4-Flash-0731
+nvidia-cuda-x86,DeepSeek-V4-Flash-0731,ktransformers-dsv4,deepseek-ai/DeepSeek-V4-Flash-0731,deepseek-ai/DeepSeek-V4-Flash-0731
+nvidia-cuda-x86,DeepSeek-V4-Flash-0731,llama.cpp,deepseek-ai/DeepSeek-V4-Flash-0731,ggml-org/DeepSeek-V4-Flash-0731-GGUF
+nvidia-cuda-x86,MiniMax-M3,freetoken,MiniMaxAI/MiniMax-M3,nvidia/MiniMax-M3-NVFP4
+nvidia-cuda-x86,Qwen3.8-27B,freetoken,Qwen/Qwen3.8-27B,RadixArk/Qwen3.8-27B-NVFP4
+nvidia-cuda-x86,Qwen3.8-27B,llama.cpp,Qwen/Qwen3.8-27B,ggml-org/Qwen3.8-27B-GGUF
+nvidia-cuda-x86,Qwen3.8-27B,ollama,Qwen/Qwen3.8-27B,qwen3.8:27b-mtp-q4_K_M
+nvidia-cuda-x86,Qwen3.6-35B-A3B,freetoken,Qwen/Qwen3.6-35B-A3B,nvidia/Qwen3.6-35B-A3B-NVFP4
+nvidia-cuda-x86,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-35B-A3B-GGUF
+nvidia-cuda-x86,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-a3b-mtp-q4_K_M
+nvidia-cuda-arm-unified,Qwen3.8-Flash-Next,llama.cpp,Qwen/Qwen3.8-Flash-Next,ggml-org/Qwen3.8-Flash-Next-GGUF
+nvidia-cuda-arm-unified,Qwen3.8-Flash-Next,ollama,Qwen/Qwen3.8-Flash-Next,qwen3.8-flash-next:125b-a6b-q4_K_M
+nvidia-cuda-arm-unified,DeepSeek-V4-Flash-0731,llama.cpp,deepseek-ai/DeepSeek-V4-Flash-0731,ggml-org/DeepSeek-V4-Flash-0731-GGUF
+nvidia-cuda-arm-unified,Qwen3.8-27B,llama.cpp,Qwen/Qwen3.8-27B,ggml-org/Qwen3.8-27B-GGUF
+nvidia-cuda-arm-unified,Qwen3.8-27B,ollama,Qwen/Qwen3.8-27B,qwen3.8:27b-mtp-q4_K_M
+nvidia-cuda-arm-unified,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-35B-A3B-GGUF
+nvidia-cuda-arm-unified,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-a3b-mtp-q4_K_M
+amd-rocm-x86,Qwen3.8-Flash-Next,llama.cpp,Qwen/Qwen3.8-Flash-Next,ggml-org/Qwen3.8-Flash-Next-GGUF
+amd-rocm-x86,Qwen3.8-Flash-Next,ollama,Qwen/Qwen3.8-Flash-Next,qwen3.8-flash-next:125b-a6b-q4_K_M
+amd-rocm-x86,DeepSeek-V4-Flash-0731,llama.cpp,deepseek-ai/DeepSeek-V4-Flash-0731,ggml-org/DeepSeek-V4-Flash-0731-GGUF
+amd-rocm-x86,Qwen3.8-27B,llama.cpp,Qwen/Qwen3.8-27B,ggml-org/Qwen3.8-27B-GGUF
+amd-rocm-x86,Qwen3.8-27B,ollama,Qwen/Qwen3.8-27B,qwen3.8:27b-mtp-q4_K_M
+amd-rocm-x86,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-35B-A3B-GGUF
+amd-rocm-x86,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-a3b-mtp-q4_K_M
+amd-apu-unified,Qwen3.8-Flash-Next,llama.cpp,Qwen/Qwen3.8-Flash-Next,ggml-org/Qwen3.8-Flash-Next-GGUF
+amd-apu-unified,Qwen3.8-Flash-Next,ollama,Qwen/Qwen3.8-Flash-Next,qwen3.8-flash-next:125b-a6b-q4_K_M
+amd-apu-unified,DeepSeek-V4-Flash-0731,llama.cpp,deepseek-ai/DeepSeek-V4-Flash-0731,ggml-org/DeepSeek-V4-Flash-0731-GGUF
+amd-apu-unified,Qwen3.8-27B,llama.cpp,Qwen/Qwen3.8-27B,ggml-org/Qwen3.8-27B-GGUF
+amd-apu-unified,Qwen3.8-27B,ollama,Qwen/Qwen3.8-27B,qwen3.8:27b-mtp-q4_K_M
+amd-apu-unified,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-35B-A3B-GGUF
+amd-apu-unified,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-a3b-mtp-q4_K_M
+apple-silicon,Qwen3.8-Flash-Next,llama.cpp,Qwen/Qwen3.8-Flash-Next,ggml-org/Qwen3.8-Flash-Next-GGUF
+apple-silicon,Qwen3.8-Flash-Next,ollama,Qwen/Qwen3.8-Flash-Next,qwen3.8-flash-next:125b-mlx
+apple-silicon,Qwen3.8-Flash-Next,lm-studio,Qwen/Qwen3.8-Flash-Next,lmstudio: qwen/qwen3.8-flash-next
+apple-silicon,Qwen3.8-Flash-Next,mlx-serve,Qwen/Qwen3.8-Flash-Next,ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit
+apple-silicon,GLM-5.3-Flash,mlx-serve,zai-org/GLM-5.3-Flash,antirez/glm-5.3-flash-gguf
+apple-silicon,DeepSeek-V4-Flash-0731,llama.cpp,deepseek-ai/DeepSeek-V4-Flash-0731,ggml-org/DeepSeek-V4-Flash-0731-GGUF
+apple-silicon,DeepSeek-V4-Flash-0731,lm-studio,deepseek-ai/DeepSeek-V4-Flash-0731,lmstudio: deepseek/deepseek-v4-flash
+apple-silicon,DeepSeek-V4-Flash-0731,mlx-serve,deepseek-ai/DeepSeek-V4-Flash-0731,ddalcu/DeepSeek-V4-Flash-0731-iQ-MLX-3.3bpw
+apple-silicon,DeepSeek-V4.1-Flash,mlx-serve,deepseek-ai/DeepSeek-V4.1-Flash,antirez/deepseek-v4.1-flash-gguf
+apple-silicon,Qwen3.8-27B,llama.cpp,Qwen/Qwen3.8-27B,ggml-org/Qwen3.8-27B-GGUF
+apple-silicon,Qwen3.8-27B,ollama,Qwen/Qwen3.8-27B,qwen3.8:27b-mlx
+apple-silicon,Qwen3.8-27B,lm-studio,Qwen/Qwen3.8-27B,lmstudio: qwen/qwen3.8-27b
+apple-silicon,Qwen3.8-27B,mlx-serve,Qwen/Qwen3.8-27B,ddalcu/Qwen3.8-27B-MLX-Serve-4bit
+apple-silicon,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-35B-A3B-GGUF
+apple-silicon,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-mlx
+apple-silicon,Qwen3.6-35B-A3B,lm-studio,Qwen/Qwen3.6-35B-A3B,lmstudio: qwen/qwen3.6-35b-a3b
+apple-silicon,Qwen3.6-35B-A3B,mlx-serve,Qwen/Qwen3.6-35B-A3B,ddalcu/Qwen3.6-35B-A3B-MLX-Serve-4bit

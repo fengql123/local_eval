@@ -13,57 +13,47 @@
       "force": {
         "ignore_eos": true
       }
-    },
-    "ollama-chat": {
-      "endpoint": "/api/chat",
-      "stream": {
-        "stream": true
-      },
-      "max_tokens": "options.num_predict",
-      "output_count": "eval_count",
-      "force": {}
     }
   },
   "baselines": {
     "candidate": {
       "api": "openai-chat",
-      "status": "authored-policy",
-      "note": "Authored evaluator request policy. Engine compatibility is accepted in Phase 6."
+      "status": "contract",
+      "note": "the task contract (run.md): OpenAI chat completions with these fields; the recording server (vLLM) follows it too"
     },
     "freetoken": {
       "api": "openai-chat",
-      "status": "authored-unverified",
-      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
-    },
-    "llama.cpp": {
-      "api": "openai-chat",
-      "status": "authored-unverified",
-      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+      "status": "verified",
+      "note": "v0.1.3 server/openai_api.py: max_tokens, ignore_eos (lines 78, 549), chat_template_kwargs, stream_options.include_usage, usage.completion_tokens"
     },
     "ktransformers": {
       "api": "openai-chat",
-      "status": "authored-unverified",
-      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+      "status": "verified",
+      "note": "serves with sglang-kt 0.7.0.post4, whose ChatCompletionRequest (protocol.py) takes max_tokens, chat_template_kwargs, ignore_eos, stream_options, top_k, min_p"
     },
     "ktransformers-dsv4": {
       "api": "openai-chat",
-      "status": "authored-unverified",
-      "note": "Category install scripts and request fields require actual engine acceptance in Phase 6."
+      "status": "verified",
+      "note": "serves with kvcache-ai/sglang at its v0.7.1 submodule: ChatCompletionRequest takes max_tokens, chat_template_kwargs, ignore_eos (protocol.py lines 290, 610), stream_options, top_k, min_p"
+    },
+    "llama.cpp": {
+      "api": "openai-chat",
+      "status": "verified",
+      "note": "b11146: max_tokens (alias of n_predict, tools/server/server-schema.cpp:44-47), ignore_eos (server-schema.cpp:475), chat_template_kwargs (server-common.cpp:1332), stream_options.include_usage, usage.completion_tokens"
     },
     "ollama": {
-      "api": "ollama-chat",
-      "status": "unsupported-agentic",
-      "note": "Native Ollama has no ignore_eos or full chat_template_kwargs pass-through. Exact agentic count and full template-policy compatibility remain unsupported."
+      "api": "openai-chat",
+      "fields": {
+        "think": true,
+        "repeat_penalty": 1.0
+      },
+      "status": "verified",
+      "note": "the suite's fork (github.com/fengql123/ollama, branch edge-eval, on v0.34.4), on /v1/chat/completions: ignore_eos (EOS, template and model stop strings do not end it; the prompt is never truncated or shifted; a run that cannot reach max_tokens is an error), chat_template_kwargs (to llama-server's template and to Ollama's own qwen3.5/qwen3.8 renderers, preserve_thinking included, checked against the Hugging Face templates), think, and the sampling fields the OpenAI API lacks (top_k, min_p, repeat_penalty, as vLLM's and llama.cpp's endpoints take them); max_tokens, stream_options.include_usage, usage.completion_tokens; tested end to end on an L40. repeat_penalty 1: its default is 1.1"
     },
     "mlx-serve": {
       "api": "openai-chat",
-      "status": "planned",
-      "note": "No supplied category installation script yet; retained as catalog intent."
-    },
-    "lm-studio": {
-      "api": "openai-chat",
-      "status": "planned",
-      "note": "No supplied category installation script yet; retained as catalog intent."
+      "status": "verified",
+      "note": "the suite's fork (github.com/fengql123/mlx-serve, branch edge-eval, on v26.9.5): ignore_eos on /v1/chat/completions (EOS and stop tokens do not end the turn; it needs max_tokens), chat_template_kwargs passed to the Jinja template (omitted keys left to the template), --served-model-name; max_tokens (server.zig), stream_options.include_usage; unit-tested on Linux, not run on Apple silicon"
     }
   },
   "models": {
@@ -88,7 +78,6 @@
         "freetoken",
         "llama.cpp",
         "ollama",
-        "lm-studio",
         "mlx-serve"
       ]
     },
@@ -129,14 +118,6 @@
         "temperature": 1.0,
         "top_p": 1.0
       },
-      "baselines": [
-        "candidate",
-        "freetoken",
-        "ktransformers-dsv4",
-        "llama.cpp",
-        "lm-studio",
-        "mlx-serve"
-      ],
       "sampling_agentic": {
         "top_k": -1,
         "min_p": 0.0,
@@ -144,7 +125,14 @@
         "frequency_penalty": 0.0,
         "temperature": 1.0,
         "top_p": 0.95
-      }
+      },
+      "baselines": [
+        "candidate",
+        "freetoken",
+        "ktransformers-dsv4",
+        "llama.cpp",
+        "mlx-serve"
+      ]
     },
     "DeepSeek-V4.1-Flash": {
       "thinking": {
@@ -206,7 +194,6 @@
         "freetoken",
         "llama.cpp",
         "ollama",
-        "lm-studio",
         "mlx-serve"
       ]
     },
@@ -230,7 +217,6 @@
         "freetoken",
         "llama.cpp",
         "ollama",
-        "lm-studio",
         "mlx-serve"
       ]
     }
