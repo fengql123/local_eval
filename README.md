@@ -5,12 +5,12 @@ finished benchmark compares a candidate against a tuned reference using recorded
 requests, a pre-run quality gate, and timing measurements. Harbor owns the task
 sandbox and the agent lifecycle through its existing adapters.
 
-**Status: Phases 1 and 2 approved.** The
-foundations now compose into host acquisition, generated Harbor tasks, and a
-foreground run/resume wrapper. Tasks now declare native Harbor search/coding
-steps; their coordinator and search runtime arrive in Phase 5. Production
-Dockerfiles/installers await owner supply; servers, replay and judging arrive
-in their own later phases.
+**Status: Phases 1–3 approved; Phase 3 supplies the shared measurement engine.**
+Host preparation and the foreground run/resume wrapper now have reusable server,
+streaming client, replay and measurement modules. Tasks declare native Harbor
+search/coding steps; their coordinator and search runtime arrive in Phase 5.
+The pre-run judge/verifier is Phase 4 work. Production Dockerfiles/installers
+await owner supply. See [Phase 3's review packet](docs/phase-03.md).
 
 ## Quickstart
 
@@ -26,8 +26,11 @@ uv run python examples/inspect_foundations.py config.example.yaml
 uv run python -m eval.run --help
 ```
 
-The tests need only a CPU and local files. They do not use networking, download
-models, build images, start Harbor jobs, or make paid agent calls. Renderer tests
+The tests need only a CPU, local files and loopback HTTP. They do not download
+models, build images, start Harbor jobs, or make paid agent calls. Phase 3 tests
+read the supplied public recordings from the sibling
+`edge-harness-v2/local_eval_data/`; set `LOCAL_EVAL_DATA` to use another local copy.
+Renderer tests
 also require the Docker Compose CLI, without a running daemon. The inspector reads
 the real example configuration and catalogs, selecting Qwen3.6-35B-A3B / S-1 and
 showing its original model checkpoint, FreeToken checkpoint, inferred installer
@@ -64,6 +67,67 @@ tests. A complete benchmark additionally needs the supplied image/installers and
 the later coordinator/search/verifier modules; this checkout does not yet run a production
 evaluation. See [Phase 2's review packet](docs/phase-02.md) for executed examples
 and the precise validation boundary.
+
+## Measure prepared recordings
+
+The measurement CLI needs three inputs:
+
+```bash
+python -m eval.bench.run MODEL WORKLOAD LAUNCH_SCRIPT
+```
+
+A baseline script lives at `images/<category>/baselines/<engine>/launch.sh` (inside
+the image: `/opt/eval/images/...`). That path identifies the category and engine,
+so the runner selects its checkpoint and request policy internally. A script
+outside that baseline layout uses candidate policy and `/models/source`.
+Source-equal baselines also reuse `/models/source`; other checkpoints retain their
+mapped repository/native tag. Launch remains independent of script contents.
+
+Run from the role's workspace. The selected workload maps to
+`data/<S|A|A-MA>/rows.jsonl`; the runner loads that prepared view and selects the
+model's rows. Host setup supplies `/workspace/data/<pool>` for coding/public
+checks and `/home/search/data/S` for search calibration. Search uses an S workload
+to measure that shared S subset. Private verification uses the same `measure()`
+API with its protected rows rather than a public CLI data selector.
+
+The runner allocates a free localhost port, launches the script from its folder,
+waits for readiness, warms up, replays and stops the process group. Each invocation
+creates `bench/<uuid>/server.log` and `report.json` under the caller's workspace.
+The report retains model, baseline, script, checkpoint and parameters with its
+timed evidence and separate warmup. The CLI prints the absolute report path.
+
+The only optional flag is `--params JSON_FILE` for search's tunable args/env;
+omission keeps backend defaults. The actual CLI regression supplies:
+
+```json
+{"args": ["--workers", "2"], "env": {"TEST_PARALLEL": "2"}}
+```
+
+These are options for its scripted HTTP peer, not verified Ollama flags. It
+exports two supplied public C2 S rows into the test workspace's
+`data/S/rows.jsonl`, creates a test-only baseline launcher, and executes:
+
+```bash
+python -m eval.bench.run C2 S-1 \
+  <test-workspace>/images/nvidia-cuda-x86/baselines/ollama/launch.sh \
+  --params <test-workspace>/params.json
+```
+
+It checks automatic data loading, the actual mapped checkpoint
+`qwen3.6:35b-a3b-mtp-q4_K_M`, internal port allocation, tunable forwarding,
+unchanged recorded bodies/policy, one excluded warmup, two timed requests, six
+scripted output tokens, the UUID output folder and a stopped server PID. Reproduce
+with `uv run pytest -q tests/test_bench_run.py::test_cli_launches_mapped_baseline_and_reports_public_rows`.
+
+| Measurement argument | Purpose |
+| --- | --- |
+| `model` | Benchmark model key/name; selects recorded rows and request policy. |
+| `workload` | `S-1`, `S-N`, `A-1`, `A-N` or `A-MA`; determines pool and scheduling. |
+| `launch` | Baseline or candidate script path; a baseline path also identifies category/engine. |
+| `--params` | Optional JSON file with tunable `args` and `env`. |
+
+`python -m eval.bench.run --help` lists this complete CLI.
+[Phase 3](docs/phase-03.md) explains its execution contract and review order.
 
 ## Configuration
 
@@ -144,12 +208,14 @@ The supplied source layout is:
 ```text
 images/<device-category>/
   Dockerfile
-  baselines/<engine>/install.sh
+  baselines/<engine>/
+    install.sh
+    launch.sh
 ```
 
 [images/README.md](images/README.md) lists the five device categories. Dockerfiles
-and installer contents are supplied by the owner when ready. They are source
-files, not setup output. Setup checks the selected Dockerfile and installers
+and script contents are supplied by the owner when ready. They are source
+files, not setup output. Setup checks the selected Dockerfile, installers and launchers
 before downloads. Harbor builds them; the wrapper never invents missing assets.
 
 The three authored catalogs are:
@@ -161,8 +227,11 @@ The three authored catalogs are:
 | `tables/request_fields.json` | Shared model sampling/thinking settings and request/output-count fields. |
 
 Installers own their repository, source ref, install prefix, and venv/native
-isolation. Their path follows the fixed folder structure; it is not a table
-column. There is no separate device or installer/launch catalog.
+isolation. Launchers own engine arguments and invoke the matching installation.
+Their paths follow the fixed folder structure; neither is a table column.
+There is no separate device or installer/launch catalog. The Launch interface fixes `CHECKPOINT`/`PORT` in the environment and the served
+name `served`. Extra arguments/environment are tuning. Scripts will be designed
+to this interface when supplied; they keep the server in the foreground.
 
 Setup uses ordinary `hf download <source-checkpoint> --local-dir <directory>`
 only for the source model. The Hugging Face CLI owns acquisition and reuse;
@@ -208,21 +277,26 @@ harness.
 | --- | --- |
 | `eval/config.py` | Parse settings and select tasks. |
 | `eval/request_policy.py` | Construct baseline/candidate requests from the authored policy and read server output counters. |
-| `eval/baselines.py` | Select source/baseline checkpoint mappings and deduplicate engine names. |
+| `eval/launch.py` | Compose fixed suite inputs and tunable args/env; validate explicit protected fields without reading templates. |
+| `eval/baselines.py` | Select source/baseline checkpoint mappings, derive launcher paths and deduplicate engine names. |
 | `eval/device.py` | Inspect selected GPUs/resources and resolve the source Dockerfile path. |
 | `eval/models.py` | Run normal HF checkpoint downloads; retain native engine identifiers. |
 | `eval/setup.py` | Select trusted HF rows directly and prepare public/calibration/private/quality JSONL views. |
 | `eval/tasks.py`, `templates/` | Render one sandbox with ordered search/coding steps, per-role budgets and shared root gates. |
 | `eval/run.py` | Save role configs, delegate one planned coordinator, resume by folder, and retain coding-only costs. |
+| `eval/bench/serve.py` | Prepare Launch argv/environment, await readiness, and clean up owned processes; optionally attach. |
+| `eval/bench/clients.py` | Send recorded OpenAI requests; collect streamed content, counts and monotonic timings. |
+| `eval/bench/replay.py` | Schedule recorded sessions, dependencies and tool delays for all five workloads. |
+| `eval/bench/run.py` | Resolve script/weights/policy, load the workload view, allocate a port and save a UUID result through the shared measurement API. |
 | `eval/bench/metrics.py` | Compute throughput and TTFT from timing records. |
 | `eval/costs.py` | Account for coding-agent/harness tokens and costs across attempts. |
 | `tables/` | Only tasks, baseline checkpoint mappings, and request policy. |
 | `images/` | Shared runtime-only image contract; category assets are added when supplied. |
-| `tests/` | Ten areas, each with two common cases and two edge cases. |
+| `tests/` | Fourteen areas, each with two common cases and two edge cases. |
 
 See [the foundation reference](docs/reference.md) for what each API does and
 working usage, [the benchmark specification](docs/benchmark.md) for the planned
 lifecycle and trusted columns, and [the Phase 1 review packet](docs/phase-01.md)
 for scope and validation. [CONTRIBUTING.md](CONTRIBUTING.md) describes development
 and the phase review process. Each approved phase becomes one commit. Phase 2 is approved; subsequent phases
-remain uncommitted until their review is complete.
+remain uncommitted until their review is complete. Phase 3 has been approved.

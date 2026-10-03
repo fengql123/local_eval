@@ -19,3 +19,4 @@
 !images/*/baselines/
 !images/*/baselines/*/
 !images/*/baselines/*/install.sh
+!images/*/baselines/*/launch.sh

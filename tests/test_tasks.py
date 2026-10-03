@@ -25,6 +25,9 @@ def _fixture(tmp_path):
     installer.parent.mkdir(parents=True)
     dockerfile.write_text("# Test-only supplied image; never built.\nFROM scratch\n")
     installer.write_text("#!/bin/sh\n# Test-only supplied installer; never executed.\n")
+    installer.with_name("launch.sh").write_text(
+        "#!/bin/sh\n# Test-only supplied launcher; never executed.\n"
+    )
     shutil.copy(Path(__file__).parents[1] / ".dockerignore", root / ".dockerignore")
     (root / "eval").mkdir()
     (root / "eval/__init__.py").write_text('"""Test-only evaluator source."""\n')
@@ -57,6 +60,9 @@ def _fixture(tmp_path):
     other_installer = root / "images" / machine.category / "baselines" / engines[1] / "install.sh"
     other_installer.parent.mkdir(parents=True)
     other_installer.write_text("#!/bin/sh\n# Test-only supplied installer; never executed.\n")
+    other_installer.with_name("launch.sh").write_text(
+        "#!/bin/sh\n# Test-only supplied launcher; never executed.\n"
+    )
     return root, machine, engines, run, inputs, assets
 
 
@@ -118,10 +124,10 @@ def test_task_parses_with_harbor_and_compose_and_protects_evaluator_inputs(tmp_p
     targets = {mount["target"] for mount in service["volumes"]}
     assert {
         "/root/eval/private",
-        "/home/search/data/calibration",
+        "/home/search/data/S",
         "/root/eval/quality",
         "/root/eval/task.json",
-        "/workspace/data/public",
+        "/workspace/data/S",
         "/models",
     } <= targets
     assert all(mount["read_only"] for mount in service["volumes"])
@@ -132,7 +138,8 @@ def test_task_parses_with_harbor_and_compose_and_protects_evaluator_inputs(tmp_p
     assert metadata["search"]["agent"]["model"] is None
     assert metadata["search"]["agent"]["env"] == ["SEARCH_API_KEY"]
     assert metadata["search"]["calibration_pool"] == "S"
-    assert metadata["inputs"]["calibration"] == "/home/search/data/calibration"
+    assert metadata["inputs"]["public"] == "/workspace/data/S"
+    assert metadata["inputs"]["calibration"] == "/home/search/data/S"
     assert metadata["candidate"]["user"] == "agent"
     assert set(metadata["assets"]) == {"root", "source", "baselines"}
     assert metadata["assets"]["source"]["source"] == "Qwen/Qwen3.6-35B-A3B"
@@ -143,16 +150,20 @@ def test_task_parses_with_harbor_and_compose_and_protects_evaluator_inputs(tmp_p
     coding_instructions = (folder / "steps/coding/instruction.md").read_text()
     search_instructions = (folder / "steps/search/instruction.md").read_text()
     assert "private" not in coding_instructions
-    assert "/home/search/data/calibration" in search_instructions
+    assert "/home/search/data/S" in search_instructions
     assert "single" in search_instructions
     assert "/models/source" in search_instructions
     assert "example/model" in search_instructions and "S request policy" in search_instructions
+    assert "/opt/eval/images/nvidia-cuda-x86/baselines/freetoken/launch.sh" in search_instructions
     assert "quantization" in search_instructions
     assert metadata["baselines"] == ["freetoken"]
     run_instructions = (folder / "environment/run.md").read_text()
     assert "Qwen/Qwen3.6-35B-A3B" in run_instructions
     assert "/models/source" in run_instructions
     assert "example/model" in run_instructions and "runtime to load" in run_instructions
+    assert "/opt/eval/images/nvidia-cuda-x86/baselines/freetoken/launch.sh" in run_instructions
+    assert "CHECKPOINT" in run_instructions and "PORT" in run_instructions
+    assert "--params" in run_instructions
     assert not (run / "models/C2/baselines").exists()
     assert "quantize" in run_instructions
 
@@ -195,6 +206,13 @@ def test_tasks_share_image_identity_independent_of_model_workload_and_host_secre
         json.loads((first / "environment/task.json").read_text())["workload"]
         != json.loads((second / "environment/task.json").read_text())["workload"]
     )
+    assert json.loads((second / "environment/task.json").read_text())["inputs"]["public"] == (
+        "/workspace/data/A"
+    )
+    assert (
+        json.loads((second / "environment/task.json").read_text())["inputs"]["calibration"]
+        == "/home/search/data/S"
+    )
     assert image.build_args == {"BASELINES": "freetoken ollama"}
     assert json.loads((first / "environment/task.json").read_text())["baselines"] == ["freetoken"]
     assert json.loads((second / "environment/task.json").read_text())["baselines"] == [
@@ -219,10 +237,13 @@ def test_tasks_share_image_identity_independent_of_model_workload_and_host_secre
     (root / "runs/private.json").write_text('{"answer": "test-only private value"}')
     assert select_image(root, machine, engines).identity == image.identity
     assert not any(path.startswith("runs/") or path == ".env" for path in image.manifest["sources"])
-    (root / "images" / machine.category / "baselines" / engines[0] / "install.sh").write_text(
-        "#!/bin/sh\n# Changed supplied source.\n"
-    )
-    assert select_image(root, machine, engines).identity != image.identity
+    baseline = root / "images" / machine.category / "baselines" / engines[0]
+    assert str(baseline.relative_to(root) / "launch.sh") in image.manifest["sources"]
+    (baseline / "launch.sh").write_text("#!/bin/sh\n# Changed supplied launcher.\n")
+    changed_launcher = select_image(root, machine, engines)
+    assert changed_launcher.identity != image.identity
+    (baseline / "install.sh").write_text("#!/bin/sh\n# Changed supplied source.\n")
+    assert select_image(root, machine, engines).identity != changed_launcher.identity
 
 
 def test_missing_supplied_image_assets_fail_before_a_task_or_build_exists(tmp_path):
@@ -232,6 +253,10 @@ def test_missing_supplied_image_assets_fail_before_a_task_or_build_exists(tmp_pa
     with pytest.raises(FileNotFoundError, match="baselines/freetoken/install.sh"):
         select_image(root, machine, engines)
     installer.write_text("#!/bin/sh\n")
+    installer.with_name("launch.sh").unlink()
+    with pytest.raises(FileNotFoundError, match="baselines/freetoken/launch.sh"):
+        select_image(root, machine, engines)
+    installer.with_name("launch.sh").write_text("#!/bin/sh\n")
     (root / machine.dockerfile).unlink()
     with pytest.raises(FileNotFoundError, match="nvidia-cuda-x86/Dockerfile"):
         select_image(root, machine, engines)

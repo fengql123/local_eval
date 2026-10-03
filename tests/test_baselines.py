@@ -7,6 +7,7 @@ def test_mapping_supplies_source_and_baseline_checkpoints():
     item = mapping("nvidia-cuda-x86", "C2", "freetoken")
     assert item.source_model_checkpoint == "Qwen/Qwen3.6-35B-A3B"
     assert item.checkpoint == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+    assert str(item.launch_script) == "images/nvidia-cuda-x86/baselines/freetoken/launch.sh"
     assert mappings("nvidia-cuda-x86", item.model)[0] == item
 
 

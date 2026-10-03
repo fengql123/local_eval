@@ -17,6 +17,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from .config import RunConfig, Task
 from .device import Machine
+from .request_policy import pool_of
 
 _CHECKOUT_TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 _PACKAGED_TEMPLATES = Path(__file__).resolve().parent / "_templates"
@@ -38,15 +39,17 @@ def select_image(repo_root: Path, machine: Machine, engines: tuple[str, ...]) ->
     """Require authored assets before downloads; identify the shared category image.
 
     The Dockerfile receives BASELINES as space-separated engine names and invokes
-    images/<category>/baselines/<engine>/install.sh. Scripts own cloning and installation.
+    images/<category>/baselines/<engine>/install.sh. Each engine also supplies a
+    launch.sh that receives its mapped checkpoint when measurement starts.
     """
     repo_root = repo_root.resolve()
     engines = tuple(sorted(engines))
     required = (
         machine.dockerfile,
         *(
-            Path("images") / machine.category / "baselines" / engine / "install.sh"
+            Path("images") / machine.category / "baselines" / engine / script
             for engine in engines
+            for script in ("install.sh", "launch.sh")
         ),
     )
     sources = set(required) | {Path(".dockerignore")}
@@ -112,9 +115,10 @@ def render_task(
     environment.mkdir(parents=True, exist_ok=False)
     for phase in ("search", "coding"):
         (task_folder / "steps" / phase / "tests").mkdir(parents=True)
+    pool = pool_of(task.workload)
     input_targets = {
-        "public": "/workspace/data/public",
-        "calibration": "/home/search/data/calibration",
+        "public": f"/workspace/data/{pool}",
+        "calibration": "/home/search/data/S",
         "private": "/root/eval/private",
         "quality": "/root/eval/quality",
     }
@@ -183,6 +187,7 @@ def render_task(
     )
     values = {
         "task": task,
+        "pool": pool,
         "config": config,
         "machine": machine,
         "image": image,

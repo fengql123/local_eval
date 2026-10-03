@@ -64,6 +64,9 @@ def _arrange(tmp_path, monkeypatch, workloads=("S-1",)):
         path = repo / "images" / machine.category / "baselines" / engine / "install.sh"
         path.parent.mkdir(parents=True)
         path.write_text("#!/bin/sh\n# Synthetic installer fixture; never executed.\n")
+        path.with_name("launch.sh").write_text(
+            "#!/bin/sh\n# Synthetic launcher fixture; never executed.\n"
+        )
     calls, rendered, acquired = [], [], []
 
     def load(source, pool, *, split):
@@ -188,7 +191,7 @@ def test_agentic_only_tasks_share_s_calibration_and_quality_with_source_reuse(
         assert len(_read(views[pool]["private"])) == 60
 
 
-def test_missing_supplied_installer_stops_before_any_acquisition(tmp_path, monkeypatch):
+def test_missing_supplied_scripts_stop_before_any_acquisition(tmp_path, monkeypatch):
     config, machine, repo, calls, rendered, acquired = _arrange(tmp_path, monkeypatch)
     installer = (
         Path("images")
@@ -200,6 +203,10 @@ def test_missing_supplied_installer_stops_before_any_acquisition(tmp_path, monke
     (repo / installer).unlink()
     monkeypatch.setattr(setup, "prepare_asset", lambda *args: pytest.fail("must not download"))
     with pytest.raises(FileNotFoundError, match="install.sh"):
+        setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
+    (repo / installer).write_text("#!/bin/sh\n")
+    (repo / installer.with_name("launch.sh")).unlink()
+    with pytest.raises(FileNotFoundError, match="launch.sh"):
         setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
     assert calls == [] and rendered == []
     assert not (tmp_path / "run" / "prepared.json").exists()

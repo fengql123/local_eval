@@ -9,6 +9,7 @@ description = "Evaluate locally implemented model serving systems with Harbor"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28,<1",
     "pyyaml>=6.0.2,<7",
 ]
 

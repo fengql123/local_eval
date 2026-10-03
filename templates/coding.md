@@ -3,7 +3,7 @@
 This task measures {{ task.workload }} on {{ machine.category }}. Harbor completed
 the reference search and its gate before this coding step. Read `/workspace/run.md` for the
 candidate interface, and inspect the recorded public inputs at
-`/workspace/data/public`. The original source checkpoint is at `/models/source`;
+`/workspace/data/{{ pool }}`. The original source checkpoint is at `/models/source`;
 baseline checkpoint locations and native model tags are listed in
 `/workspace/run.md`. Identical source/baseline checkpoints share the same files.
 

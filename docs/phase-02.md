@@ -2,15 +2,23 @@
 
 ## Status
 
-Implemented and approved for one commit. Phase 1 remains commit `af52a39`;
-this packet accompanies the complete Phase 2 commit. Production Dockerfiles and installers are
-still owner-supplied. Servers, replay and verifier implementations arrive in
-Phases 3–4; the adapter coordinator and reference search arrive in Phase 5.
+Committed as `32ba1da` (`feat: prepare native Harbor evaluation tasks`).
+Phase 1 remains commit `af52a39`. Production Dockerfiles and installers are
+still owner-supplied. Phase 3's server/client/replay modules are now implemented
+for review; the verifier arrives in Phase 4, and the adapter coordinator and
+reference search arrive in Phase 5. Phase 3 extends the supplied image-asset
+contract with per-baseline launch.sh beside install.sh; current setup requires
+and hashes both scripts. See [the revised Phase 3 packet](phase-03.md).
 
 Phase 2 maps configuration and trusted Hugging Face rows into Harbor tasks,
 downloads their source checkpoints, and prepares/runs/resumes one foreground Harbor job.
 The generated contract now declares native search then coding steps. Their future
 coordinator delegates existing Harbor adapters; startup only readies the sandbox.
+
+Phase 3 now also mounts public views at `/workspace/data/<workload-pool>` and
+shared S calibration at `/home/search/data/S`. Its smaller measurement CLI loads
+those prepared views by workload automatically. Metadata input key names remain
+unchanged; the approved Phase 2 commit is preserved.
 
 ## Review order
 
@@ -170,8 +178,8 @@ mapped engines and checkpoints.
 
 | Input | Mount | Who can read it in the supplied image |
 | --- | --- | --- |
-| Public workload rows | `/workspace/data/public` | Coding agent and evaluator |
-| Calibration rows | `/home/search/data/calibration` | Search and trusted root operations |
+| Public workload rows | `/workspace/data/<pool>` | Coding agent and evaluator |
+| Calibration rows | `/home/search/data/S` | Search and trusted root operations |
 | Private performance rows | `/root/eval/private` | Root evaluator |
 | Fixed S quality subset | `/root/eval/quality` | Root evaluator |
 | Resolved runtime settings | `/root/eval/task.json` | Root evaluator |

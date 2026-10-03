@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import TABLES
 from .config import model as get_model
@@ -16,6 +17,10 @@ class BaselineMapping:
     baseline: str
     source_model_checkpoint: str
     checkpoint: str
+
+    @property
+    def launch_script(self) -> Path:
+        return Path("images") / self.category / "baselines" / self.baseline / "launch.sh"
 
 
 def mappings(category: str, model: str) -> tuple[BaselineMapping, ...]:

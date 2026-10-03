@@ -13,20 +13,23 @@ uv run ruff format --check .
 
 The lockfile fixes runtime, host and development dependencies. Phase 2 puts
 Harbor, Hugging Face datasets/downloads and Jinja rendering in the `host` extra.
-Development includes that extra; the task image installs only the base runtime. Add serving and grading
-dependencies when their implemented modules need them.
+Development includes that extra; the task image installs only the base runtime
+(PyYAML and HTTPX). Add grading dependencies when their implemented modules need them.
 
 ## Scope and tests
 
 Implement only the current phase. Keep configuration, catalog metadata, device
-observation, timing, and agent-cost accounting with their owners. Installation
-belongs to supplied device Dockerfiles and category baseline scripts. There is
+observation, timing, and agent-cost accounting with their owners. Installation and launches
+belong to supplied device Dockerfiles and category baseline install.sh/launch.sh scripts. There is
 no generated-image layer or tuning allowlist.
 
 Each test area has **two common cases and two edge cases**. Use explicit,
 small evidence: hand-calculated timing windows, saved hardware replies, and the
 local Harbor usage fixture. Do not add large parameter matrices or shared test
-infrastructure for later phases. HTTP stream fixtures arrive with HTTP clients;
+infrastructure for later phases. Phase 3 uses `tests/http_server.py` as a shared
+local HTTP/SSE fixture for its implemented client and measurement tests. Its
+replay tests read the supplied public parquet rows from the sibling
+`edge-harness-v2/local_eval_data/` or `LOCAL_EVAL_DATA` directory.
 Phase 2 checks the actual Harbor task schema and Compose configuration; tests
 replace the job execution boundary rather than starting paid jobs or GPU builds.
 
@@ -48,7 +51,7 @@ contains authored source assets and must remain tracked.
 | --- | --- | --- |
 | 1 | Config, catalogs, baseline metadata, device, metrics, costs | No dataset or image builds |
 | 2 | Setup, model assets, native search/coding task contract, foreground run/resume | Acquisition/rendering fixtures; supplied images/scripts for production builds |
-| 3 | Servers, HTTP clients, recorded replay, measurement | Owner supplies recorded rows/access |
+| 3 | Mapped launch scripts, servers, HTTP clients, recorded replay, measurement (implemented for review) | Supplied local public recordings; CPU and loopback HTTP |
 | 4 | Offline pre-run quality/static gate and timed verifier | Reuse supplied rows |
 | 5 | Harbor adapter coordinator, reference search, trusted handoff, operation logs and coding-only usage | Reuse shared private-S calibration and the Phase 2 step contract; record no search billing |
 | 6 | Harbor and selected device/engine acceptance | Supplied images/scripts and actual target hardware |
