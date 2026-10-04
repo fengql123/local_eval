@@ -137,6 +137,20 @@ def test_finish_boundary_covers_invisible_forced_tokens_and_s_allowance():
         assert requests[1]["max_tokens"] == 32768
         assert requests[1]["model"] == "candidate"
 
+        async def answer_without_usage(reader, writer, body):
+            await headers(writer)
+            writer.write(
+                event({"content": "Final answer: B."}) + event(finish="stop") + b"data: [DONE]\n\n"
+            )
+            await writer.drain()
+
+        async with server(answer_without_usage) as (endpoint, _):
+            async with ChatClient(endpoint, request_fields("C2"), mode="quality") as client:
+                quality = await client.request(recorded(), "S-1")
+        assert quality["ok"] and quality["text"] == "Final answer: B."
+        assert "output_tokens" not in quality and "cached_tokens" not in quality
+        assert not any(key.startswith("t_") for key in quality)
+
     asyncio.run(run())
 
 
@@ -167,6 +181,13 @@ def test_incomplete_error_and_usage_only_streams_have_no_valid_score():
                     result = await client.request(recorded(), "A-N")
             assert not result["ok"]
             assert any(message in error for error in result["errors"])
+
+            if message in ("missing [DONE]", "server error"):
+                async with server(respond) as (endpoint, _):
+                    async with ChatClient(endpoint, request_fields("C2"), mode="quality") as client:
+                        quality = await client.request(recorded(), "S-1")
+                assert not quality["ok"]
+                assert any(message in error for error in quality["errors"])
 
     asyncio.run(run())
 

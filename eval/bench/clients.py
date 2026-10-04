@@ -1,4 +1,4 @@
-"""Send recorded OpenAI chat requests and collect streaming timing evidence.
+"""Send recorded OpenAI chat requests for timing or answer quality.
 
 Messages and tools are JSON strings in the prepared dataset. Parsing happens at
 this HTTP boundary; replay never rewrites the recorded conversation. Server usage
@@ -14,13 +14,13 @@ import httpx
 from ..request_policy import RequestPolicy
 
 
-async def _events(response: httpx.Response):
+async def _events(response: httpx.Response, *, timing: bool):
     """Frame SSE data independently of HTTP packet boundaries."""
     data = []
     async for line in response.aiter_lines():
         if not line:
             if data:
-                yield "\n".join(data), perf_counter()
+                yield "\n".join(data), perf_counter() if timing else None
                 data.clear()
         elif line.startswith("data:"):
             value = line[5:]
@@ -37,11 +37,13 @@ class ChatClient:
         *,
         served_model: str = "served",
         timeout: float = 3600,
+        mode: str = "timing",
     ):
         self.url = endpoint.rstrip("/") + policy.endpoint
         self.policy = policy
         self.served_model = served_model
         self.timeout = timeout
+        self.timing = mode == "timing"
         self._client = httpx.AsyncClient(
             timeout=timeout,
             trust_env=False,
@@ -59,7 +61,7 @@ class ChatClient:
         """Return stream evidence; HTTP/transport failures propagate to replay.
 
         Protocol failures produce an invalid request with explicit errors. The
-        caller owns scheduling and answer grading belongs to the judge.
+        caller owns scheduling and the selected accuracy function grades quality replies.
         """
         body = self.policy.request(
             json.loads(request["messages"]),
@@ -71,18 +73,21 @@ class ChatClient:
         result = dict(
             ok=False,
             request_id=request["id"],
-            t_send=perf_counter(),
-            t_first=None,
-            t_last=None,
-            t_end=None,
-            output_tokens=None,
-            cached_tokens=None,
             text="",
             reasoning="",
             tool_calls=[],
             finish_reason=None,
             errors=[],
         )
+        if self.timing:
+            result.update(
+                t_send=perf_counter(),
+                t_first=None,
+                t_last=None,
+                t_end=None,
+                output_tokens=None,
+                cached_tokens=None,
+            )
         tools = {}
         done = False
         async with (
@@ -92,7 +97,7 @@ class ChatClient:
             response.raise_for_status()
             if "text/event-stream" not in response.headers.get("content-type", ""):
                 result["errors"].append("response is not an SSE stream")
-            async for data, received in _events(response):
+            async for data, received in _events(response, timing=self.timing):
                 if data == "[DONE]":
                     done = True
                     break
@@ -100,17 +105,18 @@ class ChatClient:
                 if event.get("error") is not None:
                     result["errors"].append(f"server error: {json.dumps(event['error'])}")
                     continue
-                count = self.policy.count(event)
-                if count is not None:
-                    if type(count) is int and count >= 0:
-                        result["output_tokens"] = count
-                    else:
-                        result["errors"].append("invalid completion token count")
-                usage = event.get("usage")
-                if usage:
-                    result["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get(
-                        "cached_tokens"
-                    )
+                if self.timing:
+                    count = self.policy.count(event)
+                    if count is not None:
+                        if type(count) is int and count >= 0:
+                            result["output_tokens"] = count
+                        else:
+                            result["errors"].append("invalid completion token count")
+                    usage = event.get("usage")
+                    if usage:
+                        result["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get(
+                            "cached_tokens"
+                        )
                 choices = event.get("choices", [])
                 if len(choices) > 1:
                     result["errors"].append("expected one completion choice")
@@ -132,32 +138,35 @@ class ChatClient:
                         function = fragment.get("function", {})
                         tool["function"]["name"] += function.get("name") or ""
                         tool["function"]["arguments"] += function.get("arguments") or ""
-                    if content or reasoning or fragments:
+                    if self.timing and (content or reasoning or fragments):
                         if result["t_first"] is None:
                             result["t_first"] = received
                         result["t_last"] = received
                     if choice.get("finish_reason") is not None:
                         result["finish_reason"] = choice["finish_reason"]
-                        # Forced generation may continue after the last visible delta.
-                        result["t_last"] = received
-        result["t_end"] = perf_counter()
+                        if self.timing:
+                            # Forced generation may continue after the last visible delta.
+                            result["t_last"] = received
+        if self.timing:
+            result["t_end"] = perf_counter()
         result["tool_calls"] = [tools[index] for index in sorted(tools)]
         if not done:
             result["errors"].append("missing [DONE] stream terminator")
         if result["finish_reason"] is None:
             result["errors"].append("missing completion finish marker")
-        if result["t_first"] is None:
-            result["errors"].append("no generated token observed; TTFT is unavailable")
-        count = result["output_tokens"]
-        if count is None:
-            result["errors"].append("missing completion token usage")
-        elif count == 0:
-            result["errors"].append("no completion tokens generated")
-        elif workload.startswith("A") and count != request["out"]:
-            result["errors"].append(
-                f"expected {request['out']} completion tokens, received {count}"
-            )
-        elif count > request["out"]:
-            result["errors"].append(f"completion tokens exceed allowance {request['out']}")
+        if self.timing:
+            if result["t_first"] is None:
+                result["errors"].append("no generated token observed; TTFT is unavailable")
+            count = result["output_tokens"]
+            if count is None:
+                result["errors"].append("missing completion token usage")
+            elif count == 0:
+                result["errors"].append("no completion tokens generated")
+            elif workload.startswith("A") and count != request["out"]:
+                result["errors"].append(
+                    f"expected {request['out']} completion tokens, received {count}"
+                )
+            elif count > request["out"]:
+                result["errors"].append(f"completion tokens exceed allowance {request['out']}")
         result["ok"] = not result["errors"]
         return result

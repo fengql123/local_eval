@@ -15,7 +15,7 @@ async def server(respond):
         try:
             if headers.startswith("GET /v1/models "):
                 writer.write(
-                    b'HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{"data": []}'
+                    b'HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{"data": [{"id": "served"}]}'
                 )
                 await writer.drain()
             else:

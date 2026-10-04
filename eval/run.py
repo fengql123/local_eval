@@ -1,8 +1,4 @@
-"""Prepare one foreground Harbor job or resume its saved configuration.
-
-The job targets eval.agents:PhasedAgent, the Phase 5 coordinator contract. That
-runtime adapter is deliberately not implemented in Phase 2, like the verifier.
-"""
+"""Run native Harbor search, coding and verification jobs in the foreground."""
 
 from __future__ import annotations
 
@@ -21,6 +17,7 @@ from harbor.models.trial.config import AgentConfig as HarborAgentConfig
 from harbor.models.trial.config import EnvironmentConfig, TaskConfig
 
 from .config import AgentConfig, RunConfig, load_config
+from .config import model as get_model
 from .costs import from_harbor_result, summarize, update_ledger
 from .device import check_environment
 from .setup import prepare
@@ -61,6 +58,7 @@ def _save_config(config: RunConfig, folder: Path) -> None:
         "evaluation": {
             "install_timeout": config.evaluation.install_timeout_seconds,
             "health_timeout": config.evaluation.health_timeout_seconds,
+            "agent": _agent_settings(config.evaluation.agent),
         },
         "out": str(config.out.resolve()),
     }
@@ -68,7 +66,7 @@ def _save_config(config: RunConfig, folder: Path) -> None:
 
 
 def _harbor_agent(agent: AgentConfig) -> dict:
-    """Describe a Harbor delegate without resolving credentials or loading its class."""
+    """Describe a native Harbor agent without resolving credentials or its class."""
     env = {name: "${" + name + "}" for name in agent.env}
     if agent.name == "codex" and agent.auth == "login":
         # Harbor 0.23's Codex adapter supplies and uploads the host login file.
@@ -90,75 +88,195 @@ def _harbor_agent(agent: AgentConfig) -> dict:
     ).model_dump(mode="json", exclude_unset=True, context={"redact_sensitive_env": False})
 
 
-def _job_config(config: RunConfig, folder: Path, paths: tuple[Path, ...]) -> JobConfig:
-    saved = folder / "jobs" / "eval" / "config.json"
+def _job_config(
+    config: RunConfig, folder: Path, paths: tuple[Path, ...], *, phase: str = "coding"
+) -> JobConfig:
+    saved = folder / "jobs" / phase / "config.json"
     if saved.exists():
-        return JobConfig.model_validate_json(saved.read_text())
+        job = JobConfig.model_validate_json(saved.read_text())
+        if job.agents[0].name == "codex":
+            # Harbor redacts literal AUTH controls; recover them from frozen YAML.
+            role = config.search.agent if phase == "search" else config.agent
+            controls = _harbor_agent(role)["env"]
+            for name in ("CODEX_FORCE_AUTH_JSON", "CODEX_AUTH_JSON_PATH"):
+                if name in controls:
+                    job.agents[0].env[name] = controls[name]
+        return job
+    if phase == "verify":
+        agent = HarborAgentConfig(name="nop")
+    elif config.agent.name == "oracle":
+        # Oracle is a complete pipeline sanity check, including reference search.
+        agent = HarborAgentConfig(name="oracle")
+    else:
+        agent = HarborAgentConfig.model_validate(
+            _harbor_agent(config.search.agent if phase == "search" else config.agent)
+        )
+    if phase != "verify":
+        role = "search" if phase == "search" else "agent"
+        agent.env = {**agent.env, "HOME": f"/home/{role}", "USER": role, "LOGNAME": role}
     return JobConfig(
-        job_name="eval",
+        job_name=phase,
         jobs_dir=folder / "jobs",
         n_concurrent_trials=1,
         environment=EnvironmentConfig(type="docker"),
-        agents=[
-            HarborAgentConfig(
-                import_path="eval.agents:PhasedAgent",
-                kwargs={
-                    "search": _harbor_agent(config.search.agent),
-                    "coding": _harbor_agent(config.agent),
-                    "search_mode": config.search.mode,
-                },
-            )
-        ],
+        agents=[agent],
         tasks=[TaskConfig(path=path) for path in paths],
     )
+
+
+def _trial_results(folder: Path, job: str) -> dict[str, tuple[Path, dict]]:
+    """Use Harbor's recorded task path to pair stage trials for each task."""
+    results = []
+    for path in (folder / "jobs" / job).glob("*/result.json"):
+        result = json.loads(path.read_text())
+        results.append((path, result))
+    results.sort(key=lambda item: (item[1].get("finished_at") or "", str(item[0])))
+    return {Path(result["config"]["task"]["path"]).name: (path, result) for path, result in results}
+
+
+def _outcome(result: dict) -> tuple[str, dict | None]:
+    """Keep native infrastructure errors separate from a valid zero reward."""
+    if (
+        not result.get("finished_at")
+        or result.get("exception_info")
+        or any(step.get("exception_info") for step in result.get("step_results") or ())
+    ):
+        return "infrastructure_error", None
+    rewards = (result.get("verifier_result") or {}).get("rewards")
+    if not rewards:
+        return "infrastructure_error", None
+    return ("candidate_failed" if rewards.get("reward") == 0 else "complete"), rewards
+
+
+def _artifact(result_path: Path, source: str) -> Path | None:
+    """Resolve only a declared directory from Harbor's single-task manifest."""
+    artifacts = result_path.parent / "artifacts"
+    manifest = artifacts / "manifest.json"
+    if not manifest.exists():
+        return None
+    entries = json.loads(manifest.read_text())
+    entry = next(
+        (
+            entry
+            for entry in entries
+            if entry["source"] == source
+            and entry["status"] == "ok"
+            and entry["type"] == "directory"
+            and entry.get("service") in (None, "main")
+        ),
+        None,
+    )
+    if entry is None:
+        return None
+    # Harbor's manifest destination includes "artifacts/", relative to the trial.
+    return artifacts.parent / entry["destination"]
+
+
+def _coding_tasks(folder: Path, paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Hand off selected parameters and trusted read-only weight mounts after search."""
+    results = _trial_results(folder, "search")
+    assets = json.loads((folder / "prepared.json").read_text())["assets"]
+    eligible = []
+    for path in paths:
+        recorded = results.get(path.name)
+        if recorded is None or _outcome(recorded[1])[0] != "complete":
+            continue
+        source = _artifact(recorded[0], "/root/eval/reference")
+        if source is None or not all(
+            (source / name).is_file() for name in ("reference.json", "public.json")
+        ):
+            continue
+        task = folder / "coding" / path.name
+        metadata = json.loads((task / "environment" / "task.json").read_text())
+        selection = json.loads((source / "reference.json").read_text())
+        asset = assets[get_model(metadata["model"]).key]["baselines"][selection["baseline"]]
+        target = task / "reference" / "metadata"
+        weights = task / "reference" / "weights"
+        if not (target / "reference.json").exists():
+            if not weights.exists():
+                if asset["path"] is None:
+                    weights.mkdir()
+                else:
+                    weights.symlink_to(Path(asset["path"]).resolve(), target_is_directory=True)
+            # Commit the protected reference last; it marks a complete handoff.
+            for name in ("public.json", "reference.json"):
+                temporary = target / ("." + name + "-" + str(uuid.uuid4()))
+                shutil.copyfile(source / name, temporary)
+                temporary.chmod(0o644 if name == "public.json" else 0o600)
+                temporary.replace(target / name)
+        eligible.append(task)
+    return tuple(eligible)
+
+
+def _verification_tasks(folder: Path, paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Seed native prepare workdirs once from successful coding artifacts."""
+    results = _trial_results(folder, "coding")
+    eligible = []
+    for path in paths:
+        recorded = results.get(path.name)
+        if recorded is None:
+            continue
+        result_path, result = recorded
+        if _outcome(result)[0] != "complete":
+            continue
+        submission = _artifact(result_path, "/workspace/submission")
+        if submission is None or not submission.is_dir():
+            continue
+        task = folder / "verification" / path.name
+        target = task / "steps" / "prepare" / "workdir" / "submission"
+        if not target.exists():
+            # Harbor uploads the entire workdir: interrupted copies stay outside it.
+            staging = task / (".submission-" + str(uuid.uuid4()))
+            shutil.copytree(submission, staging, symlinks=True)
+            staging.rename(target)
+        eligible.append(task)
+    return tuple(eligible)
+
+
+def _final_results(folder: Path, paths: tuple[Path, ...]) -> None:
+    results = {phase: _trial_results(folder, phase) for phase in ("search", "coding", "verify")}
+    tasks = {}
+    for path in paths:
+        recorded = {phase: trials.get(path.name) for phase, trials in results.items()}
+        for phase in recorded:
+            trial = recorded[phase]
+            status, rewards = _outcome(trial[1]) if trial else ("infrastructure_error", None)
+            if status != "complete":
+                break
+        checked = recorded["verify"]
+        if status == "complete":
+            report = checked[0].parent / "steps" / "measure" / "verifier" / "report.json"
+            if report.exists() and json.loads(report.read_text())["outcome"] == "candidate_failure":
+                status = "candidate_failed"
+        tasks[path.name] = {
+            "status": status,
+            "stage": phase,
+            "rewards": rewards,
+            "search_result": str(recorded["search"][0]) if recorded["search"] else None,
+            "coding_result": str(recorded["coding"][0]) if recorded["coding"] else None,
+            "verification_result": str(checked[0]) if checked else None,
+        }
+    _write_json(folder / "result.json", {"tasks": tasks})
 
 
 def _collect_costs(folder: Path) -> None:
     """Save finalized coding evidence; search never creates a cost attempt."""
     attempts = []
-    for result_path in sorted((folder / "jobs" / "eval").glob("*/result.json")):
+    for result_path in sorted((folder / "jobs" / "coding").glob("*/result.json")):
         result = json.loads(result_path.read_text())
         cancelled = (result.get("exception_info") or {}).get("exception_type") == "CancelledError"
         if not result.get("finished_at") and not cancelled:
             continue
         agent_config = (result.get("config") or {}).get("agent") or {}
-        # Harbor leaves step_results unset until native multi-step execution starts.
-        if (
-            agent_config.get("import_path") == "eval.agents:PhasedAgent"
-            or result.get("step_results") is not None
-        ):
-            coding = next(
-                (
-                    step
-                    for step in result.get("step_results") or ()
-                    if step["step_name"] == "coding"
-                ),
-                None,
-            )
-            if coding is None:
-                continue
-            trajectory = result_path.parent / "steps" / "coding" / "agent" / "trajectory.json"
-            delegate = result["config"]["agent"]["kwargs"]["coding"]
-            result = {
-                **result,
-                "agent_result": None,
-                "step_results": [coding],
-                "agent_info": {
-                    "name": delegate.get("name") or delegate.get("import_path"),
-                    "model_info": {"name": delegate.get("model_name")},
-                },
-            }
-        else:
-            trajectory = result_path.parent / "agent" / "trajectory.json"
+        if agent_config.get("name") == "oracle":
+            # Native solutions execute scripts, without coding-model usage.
+            continue
+        trajectory = result_path.parent / "agent" / "trajectory.json"
         evidence = [str(result_path)]
         trajectory_data = None
         if trajectory.exists():
             evidence.append(str(trajectory))
             trajectory_data = json.loads(trajectory.read_text())
-            if result.get("step_results") is not None:
-                result["agent_info"]["model_info"]["provider"] = (
-                    trajectory_data.get("agent") or {}
-                ).get("provider")
         attempts.append(
             from_harbor_result(
                 result,
@@ -172,10 +290,11 @@ def _collect_costs(folder: Path) -> None:
 
 def _remove_cancelled(folder: Path) -> None:
     """Remove cancelled trials only after _collect_costs persisted their usage."""
-    for result_path in (folder / "jobs" / "eval").glob("*/result.json"):
-        result = json.loads(result_path.read_text())
-        if (result.get("exception_info") or {}).get("exception_type") == "CancelledError":
-            shutil.rmtree(result_path.parent)
+    for job in ("search", "coding", "verify"):
+        for result_path in (folder / "jobs" / job).glob("*/result.json"):
+            result = json.loads(result_path.read_text())
+            if (result.get("exception_info") or {}).get("exception_type") == "CancelledError":
+                shutil.rmtree(result_path.parent)
 
 
 async def run(config_path: Path | None = None, *, resume: Path | None = None) -> Path:
@@ -202,11 +321,25 @@ async def run(config_path: Path | None = None, *, resume: Path | None = None) ->
             paths = tuple(Path(path) for path in json.loads(saved.read_text())["task_paths"])
         else:
             paths = prepare(config, folder).task_paths
-        job_config = _job_config(config, folder, paths)
-        state["status"] = "running"
+        search = tuple(folder / "search" / path.name for path in paths)
+        job_config = _job_config(config, folder, search, phase="search")
+        state["status"] = "searching"
         _write_json(folder / "run.json", state)
         job = await Job.create(job_config)
         await job.run()
+        coding = _coding_tasks(folder, paths)
+        if coding:
+            state["status"] = "coding"
+            _write_json(folder / "run.json", state)
+            job = await Job.create(_job_config(config, folder, coding))
+            await job.run()
+        verification = _verification_tasks(folder, coding)
+        if verification:
+            state["status"] = "verifying"
+            _write_json(folder / "run.json", state)
+            job = await Job.create(_job_config(config, folder, verification, phase="verify"))
+            await job.run()
+        _final_results(folder, paths)
     finally:
         # Finalization is part of the run lifecycle, including interruption.
         # No exception is caught or converted into fallback evidence.

@@ -1,16 +1,19 @@
 schema_version = "1.4"
-multi_step_reward_strategy = "final"
+artifacts = {{ (["/root/eval/reference"] if phase == "search" else ["/workspace/submission"]) | tojson }}
 
 [task]
-name = {{ ("local-eval/" + task.task_id) | tojson }}
-description = {{ (task.model + " serving benchmark: " + task.workload) | tojson }}
+name = {{ ("local-eval-" + phase + "/" + task.task_id) | tojson }}
+description = {{ (phase | capitalize + " for " + task.model + ": " + task.workload) | tojson }}
 
 [environment]
+{% if phase == "coding" %}
+docker_image = {{ image.tag | tojson }}
+{% endif %}
 build_timeout_sec = {{ config.evaluation.install_timeout_seconds }}
 cpus = {{ machine.cpu_cores }}
 memory_mb = {{ machine.memory_bytes // 1048576 }}
 gpus = {{ machine.gpus | length }}
-workdir = "/workspace"
+workdir = {{ ("/home/search" if phase == "search" else "/workspace") | tojson }}
 
 [environment.healthcheck]
 command = "test -f /run/eval-ready"
@@ -19,32 +22,20 @@ timeout_sec = 2
 start_period_sec = {{ config.evaluation.health_timeout_seconds }}
 retries = 1
 
+[agent]
+user = {{ ("search" if phase == "search" else "agent") | tojson }}
+timeout_sec = {{ config.search.agent.budget_seconds if phase == "search" else (config.agent.budget_seconds if config.agent else 7200) }}
+
 [verifier]
-environment_mode = "shared"
-user = "root"
-timeout_sec = 172800
-
-[[steps]]
-name = "search"
-min_reward = 1
-
-[steps.agent]
-user = "search"
-timeout_sec = {{ config.search.agent.budget_seconds }}
-
-[steps.verifier]
 environment_mode = "shared"
 user = "root"
 timeout_sec = 600
 
-[[steps]]
-name = "coding"
-
-[steps.agent]
-user = "agent"
-timeout_sec = {{ config.agent.budget_seconds if config.agent else 7200 }}
-
-[steps.verifier]
-environment_mode = "shared"
+[[verifier.collect]]
+{% if phase == "coding" %}
+command = "/opt/eval/.venv/bin/python -I -m eval.verify.run --collect-submission"
+{% else %}
+command = "/opt/eval/.venv/bin/python -I -m eval.search.run --task /root/eval/task.json --stage collect"
+{% endif %}
 user = "root"
-timeout_sec = 172800
+timeout_sec = 60

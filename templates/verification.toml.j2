@@ -1,0 +1,69 @@
+schema_version = "1.4"
+multi_step_reward_strategy = "final"
+
+[task]
+name = {{ ("local-eval-verification/" + task.task_id) | tojson }}
+description = {{ ("Fresh verification of " + task.model + ": " + task.workload) | tojson }}
+
+[environment]
+docker_image = {{ image.tag | tojson }}
+build_timeout_sec = {{ config.evaluation.install_timeout_seconds }}
+cpus = {{ machine.cpu_cores }}
+memory_mb = {{ machine.memory_bytes // 1048576 }}
+gpus = {{ machine.gpus | length }}
+workdir = "/workspace"
+
+[environment.healthcheck]
+command = "test -f /run/eval-ready"
+interval_sec = 2
+timeout_sec = 2
+start_period_sec = {{ config.evaluation.health_timeout_seconds }}
+retries = 1
+
+[verifier]
+environment_mode = "shared"
+user = "root"
+timeout_sec = 172800
+
+[[steps]]
+name = "prepare"
+min_reward = 1
+
+[steps.agent]
+user = "root"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "root"
+timeout_sec = {{ config.evaluation.install_timeout_seconds * 2 + 600 }}
+
+[[steps]]
+name = "review"
+min_reward = 1
+
+[steps.agent]
+user = "judge"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "judge"
+timeout_sec = {{ config.evaluation.agent.budget_seconds + 120 }}
+
+[steps.verifier.env]
+{% for name, value in review_env.items() %}
+{{ name }} = {{ value | tojson }}
+{% endfor %}
+
+[[steps]]
+name = "measure"
+
+[steps.agent]
+user = "root"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "root"
+timeout_sec = 172800

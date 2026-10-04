@@ -33,5 +33,21 @@ search:
 evaluation:
   install_timeout: 4h
   health_timeout: 1h
+  # Verification uses Rewardkit's agent judge: claude-code, codex or fx.
+  agent:
+    name: claude-code
+    # Optional; omitted/null uses the selected reviewer's default model.
+    model: null
+    auth: login
+    # Variable names only; values come from the host environment, not this YAML.
+    # Empty env: login uses CLAUDE_CODE_OAUTH_TOKEN (Claude), CODEX_AUTH_JSON
+    # (Codex) or VERCEL_OIDC_TOKEN (Fx); api_key uses the provider's API key.
+    # A host CLI login alone does not supply verifier credentials.
+    # Codex may explicitly forward [CODEX_AUTH_JSON, REWARDKIT_FORCE_SUBSCRIPTION].
+    env: []
+    budget: 30m
+    # Native Rewardkit AgentJudge options: version and mcp_servers.
+    # Workspace, batching and isolation are controlled by the evaluator.
+    kwargs: {}
 
 out: runs

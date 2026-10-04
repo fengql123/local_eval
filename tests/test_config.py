@@ -1,6 +1,14 @@
 import pytest
 
-from eval.config import QUALITY_SUBSET, TaskSelection, load_config, parse_config, select_tasks
+from eval.config import (
+    QUALITY_SUBSET,
+    AgentConfig,
+    TaskSelection,
+    load_config,
+    parse_config,
+    reviewer_env,
+    select_tasks,
+)
 
 
 def test_task_filters_select_their_intersection():
@@ -11,6 +19,20 @@ def test_task_filters_select_their_intersection():
     assert QUALITY_SUBSET == 24
     assert config.search.agent.name == "claude-code"
     assert config.search.agent.model is None
+    assert config.evaluation.agent.name == "claude-code"
+    assert config.evaluation.agent.model is None
+    assert config.evaluation.agent.auth == "login"
+    assert config.evaluation.agent.budget_seconds == 1800
+    assert reviewer_env(config.evaluation.agent) == ("CLAUDE_CODE_OAUTH_TOKEN",)
+    assert reviewer_env(AgentConfig("codex")) == (
+        "CODEX_AUTH_JSON",
+        "REWARDKIT_FORCE_SUBSCRIPTION",
+    )
+    assert reviewer_env(AgentConfig("codex", auth="api_key")) == ("OPENAI_API_KEY",)
+    fx = parse_config({"evaluation": {"agent": {"name": "fx"}}})
+    assert reviewer_env(fx.evaluation.agent) == ("VERCEL_OIDC_TOKEN",)
+    fx_api = parse_config({"evaluation": {"agent": {"name": "fx", "auth": "api_key"}}})
+    assert reviewer_env(fx_api.evaluation.agent) == ("AI_GATEWAY_API_KEY",)
 
 
 def test_load_config_resolves_all_authored_settings_without_side_effects(tmp_path):
@@ -37,7 +59,16 @@ search:
     auth: api_key
     env: [SEARCH_CREDENTIAL]
     budget: 45m
-evaluation: {install_timeout: 90, health_timeout: 5m}
+evaluation:
+  install_timeout: 90
+  health_timeout: 5m
+  agent:
+    name: codex
+    model: review-model
+    auth: api_key
+    env: [REVIEW_API_KEY]
+    budget: 20m
+    kwargs: {version: 0.1.0, mcp_servers: []}
 out: results
 """
     )
@@ -60,6 +91,13 @@ out: results
     assert config.search.agent.budget_seconds == 2700
     assert config.evaluation.install_timeout_seconds == 90
     assert config.evaluation.health_timeout_seconds == 300
+    assert config.evaluation.agent.name == "codex"
+    assert config.evaluation.agent.model == "review-model"
+    assert config.evaluation.agent.auth == "api_key"
+    assert config.evaluation.agent.env == ("REVIEW_API_KEY",)
+    assert reviewer_env(config.evaluation.agent) == ("REVIEW_API_KEY",)
+    assert config.evaluation.agent.budget_seconds == 1200
+    assert config.evaluation.agent.kwargs == {"version": "0.1.0", "mcp_servers": []}
     assert config.out == tmp_path / "results"
     assert not config.out.exists()
     custom = parse_config({"agent": {"name": "harbor.agents.nop:NopAgent"}})
@@ -71,6 +109,10 @@ out: results
 def test_unknown_config_field_is_rejected():
     with pytest.raises(TypeError, match="ids"):
         parse_config({"tasks": {"ids": ["qwen36-35b-a3b_A-N"]}})
+    with pytest.raises(ValueError, match="unknown Rewardkit agent judge"):
+        parse_config({"evaluation": {"agent": {"name": "unknown-agent"}}})
+    with pytest.raises(TypeError, match="judge_model"):
+        parse_config({"evaluation": {"judge_model": "removed-flat-field"}})
 
 
 def test_empty_task_intersection_is_rejected():

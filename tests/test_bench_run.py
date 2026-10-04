@@ -45,8 +45,8 @@ def test_supplied_rows_reach_http_unchanged_for_every_workload(monkeypatch):
     async def no_idle(_seconds):
         await asyncio.sleep(0)
 
-    async def quick_replay(selected, workload, client):
-        return await replay(selected, workload, client, sleep=no_idle)
+    async def quick_replay(selected, workload, client, *, concurrency=None):
+        return await replay(selected, workload, client, concurrency=concurrency, sleep=no_idle)
 
     monkeypatch.setattr(run, "replay", quick_replay)
 
@@ -117,8 +117,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 Path({str(arguments)!r}).write_text(json.dumps({{
     "args": sys.argv[1:],
-    "checkpoint": os.environ["CHECKPOINT"],
-    "port": os.environ["PORT"],
+    "checkpoint": os.environ.get("CHECKPOINT"),
+    "port": "8000",
     "alias": os.environ["FIXED_ALIAS"],
     "parallel": os.environ["TEST_PARALLEL"],
 }}))
@@ -127,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'{{"data": []}}')
+        self.wfile.write(b'{{"data": [{{"id": "served"}}]}}')
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         with Path({str(requests)!r}).open("a") as handle:
@@ -142,14 +142,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
     def log_message(self, *_args):
         pass
-HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
+HTTPServer(("127.0.0.1", 8000), Handler).serve_forever()
 """)
     launch = baseline / "launch.sh"
     launch.write_text(
         "export FIXED_ALIAS=served\n"
         f"exec {shlex.quote(sys.executable)} {shlex.quote(str(program))} "
         '--model "$CHECKPOINT" --served-model-name "$FIXED_ALIAS" '
-        '--host 127.0.0.1 --port "$PORT" "$@"\n'
+        '--host 127.0.0.1 --port 8000 "$@"\n'
     )
 
     async def scenario():
@@ -183,7 +183,7 @@ HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
     item = mapping("nvidia-cuda-x86", "C2", "ollama")
     observed = json.loads(arguments.read_text())
     port = int(observed["port"])
-    assert 0 < port <= 65535
+    assert port == 8000
     assert report["model"] == item.model
     assert report["baseline"] == "ollama"
     assert report["checkpoint"] == item.checkpoint
@@ -218,6 +218,55 @@ HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
         for row in selected
     ]
     assert received == [expected[0], *expected]
+    assert not Path(f"/proc/{pid_file.read_text()}").exists()
+
+    async def quality_cli(launcher):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "eval.bench.run",
+            "C2",
+            "A-N",
+            str(launcher),
+            "--mode",
+            "quality",
+            "--concurrency",
+            "-1",
+            "--params",
+            str(params),
+            cwd=tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
+        assert process.returncode == 0, stderr.decode()
+        output = Path(stdout.decode().strip().removeprefix("Accuracy report: "))
+        result = json.loads(output.read_text())
+        # The CPU fixture deliberately answers with non-gold text.
+        assert result == {"accuracy": 0.0}
+        return output
+
+    asyncio.run(quality_cli(launch))
+    # A completed candidate supplies its own optimized weights and parameters.
+    candidate = tmp_path / "launch.sh"
+    candidate.write_text(
+        "export FIXED_ALIAS=served\n"
+        f"exec {shlex.quote(sys.executable)} {shlex.quote(str(program))} "
+        "--model /workspace/weights/optimized --host 127.0.0.1 --port 8000 --workers 4\n"
+    )
+    asyncio.run(quality_cli(candidate))
+    candidate_input = json.loads(arguments.read_text())
+    assert candidate_input["checkpoint"] is None
+    assert candidate_input["args"] == [
+        "--model",
+        "/workspace/weights/optimized",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--workers",
+        "4",
+    ]
     assert not Path(f"/proc/{pid_file.read_text()}").exists()
 
 

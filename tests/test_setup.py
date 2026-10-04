@@ -60,6 +60,7 @@ def _arrange(tmp_path, monkeypatch, workloads=("S-1",)):
     dockerfile.parent.mkdir(parents=True)
     dockerfile.write_text("# Synthetic source fixture; never built.\nFROM scratch\n")
     (repo / ".dockerignore").write_text("runs/\n")
+    (repo / "images/prepare.sh").write_text("#!/bin/sh\n# Synthetic image asset; never executed.\n")
     for engine in needed(machine.category, ("C2",)):
         path = repo / "images" / machine.category / "baselines" / engine / "install.sh"
         path.parent.mkdir(parents=True)
@@ -82,7 +83,7 @@ def _arrange(tmp_path, monkeypatch, workloads=("S-1",)):
 
     def render(task, config, machine, image, run_folder, inputs, assets):
         rendered.append((task, inputs, assets))
-        path = run_folder / "tasks" / task.task_id
+        path = run_folder / "coding" / task.task_id
         path.mkdir(parents=True)
         return path
 
@@ -107,11 +108,24 @@ def test_s_views_preserve_rows_and_sample_shared_calibration(tmp_path, monkeypat
     assert source_asset["checkpoint"] == source_asset["path"]
     baseline_assets = result.assets["C2"]["baselines"]
     assert baseline_assets["freetoken"]["source"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
-    assert baseline_assets["freetoken"]["path"] is None
-    assert baseline_assets["freetoken"]["checkpoint"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
-    assert acquired == [(source_asset["source"], Path(source_asset["path"]))]
+    assert Path(baseline_assets["freetoken"]["path"]) == (
+        tmp_path / "run" / "models" / "C2" / "baselines" / "freetoken"
+    )
+    assert baseline_assets["freetoken"]["checkpoint"] == baseline_assets["freetoken"]["path"]
+    assert acquired == [
+        (source_asset["source"], Path(source_asset["path"])),
+        (baseline_assets["freetoken"]["source"], Path(baseline_assets["freetoken"]["path"])),
+        (baseline_assets["llama.cpp"]["source"], Path(baseline_assets["llama.cpp"]["path"])),
+        (
+            baseline_assets["ollama"]["source"],
+            Path(result.assets["C2"]["root"]) / "baselines/ollama",
+        ),
+    ]
     assert baseline_assets["ollama"]["path"] is None
     assert Path(result.assets["C2"]["root"]).stat().st_mode & 0o777 == 0o755
+    baseline_store = Path(result.assets["C2"]["root"]) / "baselines"
+    assert baseline_store.stat().st_mode & 0o777 == 0o755
+    assert sorted(path.name for path in baseline_store.iterdir()) == ["freetoken", "llama.cpp"]
     assert Path(views["public"]).stat().st_mode & 0o777 == 0o755
     assert (Path(views["public"]) / "rows.jsonl").stat().st_mode & 0o777 == 0o644
     assert Path(views["calibration"]).stat().st_mode & 0o777 == 0o755
@@ -167,24 +181,28 @@ def test_agentic_only_tasks_share_s_calibration_and_quality_with_source_reuse(
     assert result.assets["C2"]["source"] == result.assets["C2"]["baselines"]["freetoken"]
     assert not (tmp_path / "run" / "models" / "C2" / "baselines" / "freetoken").exists()
     assert set(views) == {"A", "A-MA", "S"}
-    assert set(views["S"]) == {"calibration", "quality"}
+    assert set(views["S"]) == {"public", "calibration", "quality"}
     assert {(pool, split) for _, pool, split in calls} == {
         ("A", "public"),
         ("A", "private"),
         ("A-MA", "public"),
         ("A-MA", "private"),
         ("S", "private"),
+        ("S", "public"),
     }
-    assert len(calls) == 5
+    assert len(calls) == 6
     quality = views["S"]["quality"]
     assert len(_read(quality)) == QUALITY_SUBSET
     assert len(rendered) == 2 and all(inputs["quality"] == quality for _, inputs, _ in rendered)
     calibration = views["S"]["calibration"]
     assert len(_read(calibration)) == CALIBRATION_SUBSET
     assert all(inputs["calibration"] == calibration for _, inputs, _ in rendered)
+    assert all(inputs["public_s"] == views["S"]["public"] for _, inputs, _ in rendered)
     assert all(row["id"].startswith("S-") for row in _read(calibration))
     assert acquired == [
-        (entries[0].source_model_checkpoint, Path(result.assets["C2"]["source"]["path"]))
+        (entries[0].source_model_checkpoint, Path(result.assets["C2"]["source"]["path"])),
+        (entries[1].checkpoint, Path(result.assets["C2"]["baselines"]["llama.cpp"]["path"])),
+        (entries[2].checkpoint, Path(result.assets["C2"]["root"]) / "baselines/ollama"),
     ]
     for pool in ("A", "A-MA"):
         assert set(views[pool]) == {"public", "private"}

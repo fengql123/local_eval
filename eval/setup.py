@@ -1,4 +1,4 @@
-"""Prepare run-owned HF views and assets, then render one Harbor task per selection.
+"""Prepare run-owned HF views and weights, then render three Harbor tasks per selection.
 
 The supplied dataset is trusted. This module maps its existing columns; it does
 not audit records, build images, or launch containers.
@@ -74,7 +74,7 @@ def prepare(
     if not (run_folder / "prepared.json").exists():
         # A folder-only resume can restart interrupted preparation. Recreate
         # generated views/tasks while keeping downloaded checkpoints.
-        for name in ("input", "tasks"):
+        for name in ("input", "search", "coding", "verification"):
             destination = run_folder / name
             if destination.exists():
                 shutil.rmtree(destination)
@@ -87,7 +87,7 @@ def prepare(
         pools = tuple(dict.fromkeys(pool_of(task.workload) for task in tasks if task.model == name))
         inputs[model.key] = {}
         for pool in dict.fromkeys((*pools, "S")):
-            splits = ("public", "private") if pool in pools else ("private",)
+            splits = ("public", "private")
             views = {}
             for split in splits:
                 source_key = (pool, split)
@@ -101,9 +101,9 @@ def prepare(
                 views[split] = view
 
             saved = {}
-            if pool in pools:
-                # The timed/public views preserve the supplied memberships.
-                for split, view in views.items():
+            # Public S is also available for quality-mode development on A/MA.
+            for split, view in views.items():
+                if pool in pools or split == "public":
                     destination = run_folder / "input" / model.key / pool / split
                     _save_view(view, destination, readable=split == "public")
                     saved[split] = str(destination)
@@ -124,13 +124,16 @@ def prepare(
         model_root = run_folder / "models" / model.key
         model_root.mkdir(parents=True, exist_ok=True)
         model_root.chmod(0o755)
+        baseline_store = model_root / "baselines"
+        baseline_store.mkdir(exist_ok=True)
+        baseline_store.chmod(0o755)
         entries = mappings(machine.category, name)
         source = entries[0].source_model_checkpoint
         source_asset = _asset(prepare_asset(source, model_root / "source"))
         baseline_assets = {
             entry.baseline: source_asset
             if entry.checkpoint == source
-            else _asset(ModelAsset(entry.checkpoint, None, entry.checkpoint))
+            else _asset(prepare_asset(entry.checkpoint, baseline_store / entry.baseline))
             for entry in entries
         }
         assets[model.key] = {
@@ -147,6 +150,8 @@ def prepare(
             "calibration": inputs[key]["S"]["calibration"],
             "quality": inputs[key]["S"]["quality"],
         }
+        if pool_of(task.workload) != "S":
+            task_inputs["public_s"] = inputs[key]["S"]["public"]
         paths.append(
             render_task(task, config, machine, image, run_folder, task_inputs, assets[key])
         )

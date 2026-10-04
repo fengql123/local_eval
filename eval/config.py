@@ -18,6 +18,16 @@ QUALITY_SUBSET = 24
 POOLS = {"S": ("S-1", "S-N"), "A": ("A-1", "A-N"), "A-MA": ("A-MA",)}
 WORKLOAD_POOL = {workload: pool for pool, workloads in POOLS.items() for workload in workloads}
 WORKLOADS = tuple(WORKLOAD_POOL)
+JUDGE_ENV = {
+    "claude-code": ("ANTHROPIC_API_KEY",),
+    "codex": ("OPENAI_API_KEY",),
+    "fx": ("AI_GATEWAY_API_KEY",),
+}
+JUDGE_LOGIN_ENV = {
+    "claude-code": ("CLAUDE_CODE_OAUTH_TOKEN",),
+    "codex": ("CODEX_AUTH_JSON", "REWARDKIT_FORCE_SUBSCRIPTION"),
+    "fx": ("VERCEL_OIDC_TOKEN",),
+}
 _CHECKOUT_TABLES = Path(__file__).resolve().parents[1] / "tables"
 _PACKAGED_TABLES = Path(__file__).resolve().parent / "_tables"
 TABLES = _PACKAGED_TABLES if _PACKAGED_TABLES.is_dir() else _CHECKOUT_TABLES
@@ -81,6 +91,11 @@ class AgentConfig:
     budget_seconds: int = 7200
 
 
+def reviewer_env(agent: AgentConfig) -> tuple[str, ...]:
+    """Select native credential inputs that Harbor forwards to the verifier."""
+    return agent.env or (JUDGE_ENV if agent.auth == "api_key" else JUDGE_LOGIN_ENV)[agent.name]
+
+
 @dataclass(frozen=True)
 class SearchConfig:
     mode: str = "combined"
@@ -91,6 +106,9 @@ class SearchConfig:
 class EvaluationConfig:
     install_timeout_seconds: int = 14400
     health_timeout_seconds: int = 3600
+    agent: AgentConfig = field(
+        default_factory=lambda: AgentConfig("claude-code", budget_seconds=1800)
+    )
 
 
 @dataclass(frozen=True)
@@ -119,10 +137,10 @@ def duration(value: int | str) -> int:
     )
 
 
-def _agent(value: dict | None) -> AgentConfig | None:
+def _agent(value: dict | None, *, default_budget: str = "2h") -> AgentConfig | None:
     if value is None:
         return None
-    budget = duration(value.pop("budget", "2h"))
+    budget = duration(value.pop("budget", default_budget))
     value["env"] = tuple(value.get("env", ()))
     return AgentConfig(**value, budget_seconds=budget)
 
@@ -144,11 +162,17 @@ def parse_config(value: Any, *, base: Path | str = ".") -> RunConfig:
     search_agent = _agent(search.pop("agent", {"name": "claude-code"}))
     search = SearchConfig(**search, agent=search_agent)
     evaluation = raw.pop("evaluation", {})
+    evaluation_agent = _agent(
+        evaluation.pop("agent", {"name": "claude-code"}), default_budget="30m"
+    )
     evaluation = EvaluationConfig(
         duration(evaluation.pop("install_timeout", "4h")),
         duration(evaluation.pop("health_timeout", "1h")),
+        agent=evaluation_agent,
         **evaluation,
     )
+    if evaluation.agent.name not in JUDGE_ENV:
+        raise ValueError(f"unknown Rewardkit agent judge: {evaluation.agent.name}")
     out = Path(raw.pop("out", "runs"))
     if not out.is_absolute():
         out = Path(base).resolve() / out

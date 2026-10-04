@@ -1,45 +1,44 @@
-"""Launch contract: two common compositions and two fixed-field override cases."""
+"""Launch inputs: two common compositions and two rejected override cases."""
 
 import asyncio
 
 import pytest
 
 from eval.bench.serve import Server
-from eval.launch import Launch
+from eval.launch import ENDPOINT, Launch
 
 
-def test_fixed_inputs_and_tuning_compose_without_a_script_template(tmp_path):
+def test_template_receives_mapped_weights_without_rewriting_the_script(tmp_path):
     template = tmp_path / "launch.sh"
-    params = {"args": ["--cache-size", "32", "--label=a b;$value"], "env": {"TUNING": "a b"}}
-    launch = Launch(
-        template,
-        "/models/source with spaces",
-        8000,
-        tuple(params["args"]),
-        dict(params["env"]),
+    source = (
+        ': "${CHECKPOINT:?checkpoint required}"\nexec engine serve "$CHECKPOINT" --port 8000 "$@"\n'
     )
-    command, environment = launch.prepare()
-    assert command == ["bash", str(template), *params["args"]]
-    assert environment == {
-        "TUNING": "a b",
-        "CHECKPOINT": "/models/source with spaces",
-        "PORT": "8000",
-    }
-    assert params == {
-        "args": ["--cache-size", "32", "--label=a b;$value"],
-        "env": {"TUNING": "a b"},
-    }
-    assert not template.exists()
+    template.write_text(source)
+    params = {"args": ["--workers", "2", "--label=a b;$value"], "env": {"TUNING": "a b"}}
+    for checkpoint in ("/models/source with spaces", "qwen3.6:35b-a3b-mtp-q4_K_M"):
+        launch = Launch(template, checkpoint, tuple(params["args"]), dict(params["env"]))
+        assert launch.needs_checkpoint
+        assert launch.prepare() == (
+            ["/bin/bash", str(template), *params["args"]],
+            {"TUNING": "a b", "CHECKPOINT": checkpoint},
+        )
+        assert template.read_text() == source
+    assert params == {"args": ["--workers", "2", "--label=a b;$value"], "env": {"TUNING": "a b"}}
 
 
-def test_no_tuning_leaves_backend_defaults_to_the_later_script(tmp_path):
-    template = tmp_path / "launch.sh"
-    launch = Launch(template, "qwen3.6:35b-a3b-mtp-q4_K_M", 8123)
-    assert launch.prepare() == (
-        ["bash", str(template)],
-        {"CHECKPOINT": "qwen3.6:35b-a3b-mtp-q4_K_M", "PORT": "8123"},
-    )
-    assert not template.exists()
+def test_completed_scripts_keep_their_weights_and_optimized_defaults(tmp_path):
+    script = tmp_path / "launch.sh"
+    for source in (
+        '# documentation: CHECKPOINT=$CHECKPOINT\nexec engine serve "/weights/optimized" --port 8000 --workers 4\n',
+        'export CHECKPOINT="/weights/optimized with spaces"\nexec engine serve "${CHECKPOINT}" --port 8000 --workers 4\n',
+        'exec engine serve "${CHECKPOINT:-/weights/optimized}" --port 8000 --workers 4\n',
+    ):
+        script.write_text(source)
+        launch = Launch(script, "/ignored/source")
+        assert not launch.needs_checkpoint
+        assert launch.prepare() == (["/bin/bash", str(script)], {})
+        assert script.read_text() == source
+        assert Server(launch).endpoint == ENDPOINT
 
 
 def test_fixed_option_overrides_fail_before_starting_or_opening_logs(tmp_path, monkeypatch):
@@ -52,25 +51,29 @@ def test_fixed_option_overrides_fail_before_starting_or_opening_logs(tmp_path, m
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
 
     async def scenario():
-        for arg in ("--model", "--model=other", "-m=other"):
-            launch = Launch(
-                template, "/models/source", 8000, (arg,), fixed_options=frozenset({"-m"})
-            )
+        for arg in ("--model", "--model=other", "--port=8001", "-m=other"):
+            launch = Launch(template, "/models/source", (arg,), fixed_options=frozenset({"-m"}))
             with pytest.raises(ValueError, match=f"{arg.split('=', 1)[0]} is fixed"):
-                async with Server(launch, "http://127.0.0.1:8000", log=log):
+                async with Server(launch, log=log):
                     pytest.fail("invalid parameters must not enter the server context")
             assert not log.exists()
 
     asyncio.run(scenario())
 
 
-def test_reserved_and_script_owned_environment_cannot_override_fixed_inputs(tmp_path):
-    launch = Launch(
-        tmp_path / "launch.sh", "/models/source", 8000, fixed_env=frozenset({"CUDA_HOME"})
-    )
-    for name in ("CHECKPOINT", "PORT", "CUDA_HOME"):
+def test_reserved_environment_and_missing_template_checkpoint_are_rejected(tmp_path):
+    script = tmp_path / "launch.sh"
+    script.write_text('exec engine serve "$CHECKPOINT" --port 8000\n')
+    launch = Launch(script, fixed_env=frozenset({"CUDA_HOME"}))
+    for name in ("CHECKPOINT", "PORT", "BASH_ENV", "ENV", "CUDA_HOME"):
         launch.env[name] = "override"
         with pytest.raises(ValueError, match=f"environment {name} is fixed"):
             launch.prepare()
         launch.env.clear()
-    assert launch.prepare()[1] == {"CHECKPOINT": "/models/source", "PORT": "8000"}
+    with pytest.raises(ValueError, match="requires a mapped CHECKPOINT"):
+        launch.prepare()
+    script.write_text(
+        'CHECKPOINT="" # still unfilled\nexec engine serve "$CHECKPOINT" --port 8000\n'
+    )
+    with pytest.raises(ValueError, match="requires a mapped CHECKPOINT"):
+        launch.prepare()

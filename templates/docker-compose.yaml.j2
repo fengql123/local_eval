@@ -1,15 +1,17 @@
 services:
   main:
     image: {{ image.tag | tojson }}
+{% if phase == "search" %}
     build:
       context: {{ image.context | string | tojson }}
       dockerfile: {{ image.dockerfile | string | tojson }}
       args: {{ image.build_args | tojson }}
       # Retain Harbor's own alias for its image OS check.
       tags: ["${MAIN_IMAGE_NAME}"]
+{% endif %}
     user: root
     init: true
-    working_dir: /workspace
+    working_dir: {{ ("/home/search" if phase == "search" else "/workspace") | tojson }}
     command: ["bash", "/opt/eval/start.sh"]
     healthcheck:
       test: ["CMD", "test", "-f", "/run/eval-ready"]
@@ -18,6 +20,7 @@ services:
       start_period: {{ config.evaluation.health_timeout_seconds }}s
       retries: 1
     volumes: {{ mounts | tojson }}
+{% if gpu_ids %}
     deploy:
       resources:
         reservations:
@@ -25,3 +28,4 @@ services:
             - driver: nvidia
               device_ids: {{ gpu_ids | tojson }}
               capabilities: [gpu]
+{% endif %}

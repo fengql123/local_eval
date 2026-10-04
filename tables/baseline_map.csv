@@ -37,18 +37,14 @@ amd-apu-unified,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-
 amd-apu-unified,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-a3b-mtp-q4_K_M
 apple-silicon,Qwen3.8-Flash-Next,llama.cpp,Qwen/Qwen3.8-Flash-Next,ggml-org/Qwen3.8-Flash-Next-GGUF
 apple-silicon,Qwen3.8-Flash-Next,ollama,Qwen/Qwen3.8-Flash-Next,qwen3.8-flash-next:125b-mlx
-apple-silicon,Qwen3.8-Flash-Next,lm-studio,Qwen/Qwen3.8-Flash-Next,lmstudio: qwen/qwen3.8-flash-next
 apple-silicon,Qwen3.8-Flash-Next,mlx-serve,Qwen/Qwen3.8-Flash-Next,ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit
 apple-silicon,GLM-5.3-Flash,mlx-serve,zai-org/GLM-5.3-Flash,antirez/glm-5.3-flash-gguf
 apple-silicon,DeepSeek-V4-Flash-0731,llama.cpp,deepseek-ai/DeepSeek-V4-Flash-0731,ggml-org/DeepSeek-V4-Flash-0731-GGUF
-apple-silicon,DeepSeek-V4-Flash-0731,lm-studio,deepseek-ai/DeepSeek-V4-Flash-0731,lmstudio: deepseek/deepseek-v4-flash
 apple-silicon,DeepSeek-V4-Flash-0731,mlx-serve,deepseek-ai/DeepSeek-V4-Flash-0731,ddalcu/DeepSeek-V4-Flash-0731-iQ-MLX-3.3bpw
 apple-silicon,DeepSeek-V4.1-Flash,mlx-serve,deepseek-ai/DeepSeek-V4.1-Flash,antirez/deepseek-v4.1-flash-gguf
 apple-silicon,Qwen3.8-27B,llama.cpp,Qwen/Qwen3.8-27B,ggml-org/Qwen3.8-27B-GGUF
 apple-silicon,Qwen3.8-27B,ollama,Qwen/Qwen3.8-27B,qwen3.8:27b-mlx
-apple-silicon,Qwen3.8-27B,lm-studio,Qwen/Qwen3.8-27B,lmstudio: qwen/qwen3.8-27b
 apple-silicon,Qwen3.8-27B,mlx-serve,Qwen/Qwen3.8-27B,ddalcu/Qwen3.8-27B-MLX-Serve-4bit
 apple-silicon,Qwen3.6-35B-A3B,llama.cpp,Qwen/Qwen3.6-35B-A3B,ggml-org/Qwen3.6-35B-A3B-GGUF
 apple-silicon,Qwen3.6-35B-A3B,ollama,Qwen/Qwen3.6-35B-A3B,qwen3.6:35b-mlx
-apple-silicon,Qwen3.6-35B-A3B,lm-studio,Qwen/Qwen3.6-35B-A3B,lmstudio: qwen/qwen3.6-35b-a3b
 apple-silicon,Qwen3.6-35B-A3B,mlx-serve,Qwen/Qwen3.6-35B-A3B,ddalcu/Qwen3.6-35B-A3B-MLX-Serve-4bit

@@ -1,7 +1,8 @@
-"""Replay prepared request graphs and collect timing evidence without grading.
+"""Replay prepared request graphs with workload defaults or explicit concurrency.
 
 Rows are independent sessions. ``S-1``, ``A-1`` and ``A-MA`` run sessions one at
 a time; ``S-N`` runs all rows together and ``A-N`` runs at most eight sessions.
+An explicit concurrency overrides that row/session limit; -1 admits all rows.
 Within a session, requests wait for every parent and then their recorded tool
 delay, except for ``A-1``, which omits tool delays. Branches can overlap freely.
 
@@ -23,9 +24,21 @@ class ReplayError(RuntimeError):
         super().__init__(f"request {record['row_id']}/{record['request_id']} failed")
 
 
-async def replay(rows: Sequence[dict], workload: str, client, *, sleep=asyncio.sleep) -> list[dict]:
+async def replay(
+    rows: Sequence[dict],
+    workload: str,
+    client,
+    *,
+    concurrency: int | None = None,
+    sleep=asyncio.sleep,
+) -> list[dict]:
     """Send original request records; return evidence in row/request order."""
-    session_limit = {"S-1": 1, "S-N": len(rows), "A-1": 1, "A-N": 8, "A-MA": 1}[workload]
+    if concurrency == 0 or (concurrency is not None and concurrency < -1):
+        raise ValueError("concurrency must be positive or -1")
+    defaults = {"S-1": 1, "S-N": len(rows), "A-1": 1, "A-N": 8, "A-MA": 1}
+    session_limit = defaults[workload] if concurrency is None else concurrency
+    if session_limit == -1:
+        session_limit = len(rows)
     slots = asyncio.Semaphore(session_limit)
     completed: list[list[dict]] = [[] for _ in rows]
 

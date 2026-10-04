@@ -1,22 +1,24 @@
-"""Select supplied category sources and render one-container Harbor tasks.
+"""Render native search, coding and verification tasks using one category image.
 
-This module neither builds images nor runs search or evaluation. Harbor owns the
-image build, shared container, and ordered search/coding steps. The coordinator
-and verifier entry points are implemented in later phases.
+Each phase starts a clean container. Search hands off only protected reference
+settings; coding hands off only submitted code. The verification task runs its
+root/judge/root steps in one shared container.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from .config import RunConfig, Task
+from .config import RunConfig, Task, reviewer_env
 from .device import Machine
+from .launch import ENDPOINT, SERVED
 from .request_policy import pool_of
 
 _CHECKOUT_TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -46,6 +48,7 @@ def select_image(repo_root: Path, machine: Machine, engines: tuple[str, ...]) ->
     engines = tuple(sorted(engines))
     required = (
         machine.dockerfile,
+        Path("images/prepare.sh"),
         *(
             Path("images") / machine.category / "baselines" / engine / script
             for engine in engines
@@ -57,6 +60,8 @@ def select_image(repo_root: Path, machine: Machine, engines: tuple[str, ...]) ->
         path.relative_to(repo_root)
         for pattern in (
             "eval/**/*.py",
+            "eval/**/*.txt",
+            "eval/**/*.toml",
             "tables/*.csv",
             "tables/*.json",
             "templates/*.j2",
@@ -109,79 +114,132 @@ def render_task(
     inputs: dict[str, str],
     assets: dict[str, Any],
 ) -> Path:
-    """Write a Harbor task using selected public data and protected evaluator inputs."""
-    task_folder = run_folder.resolve() / "tasks" / task.task_id
-    environment = task_folder / "environment"
-    environment.mkdir(parents=True, exist_ok=False)
-    for phase in ("search", "coding"):
-        (task_folder / "steps" / phase / "tests").mkdir(parents=True)
+    """Write three native tasks; return the coding path used by setup and resume."""
+    run_folder = run_folder.resolve()
+    folders = {
+        phase: run_folder / phase / task.task_id for phase in ("search", "coding", "verification")
+    }
+    for phase, folder in folders.items():
+        (folder / "environment").mkdir(parents=True, exist_ok=False)
+        if phase != "verification":
+            (folder / "tests").mkdir()
+            (folder / "solution").mkdir()
+        else:
+            for stage in ("prepare", "review", "measure"):
+                (folder / "steps" / stage / "tests").mkdir(parents=True)
+            (folder / "steps/prepare/workdir").mkdir()
+    search, coding, verification = (
+        folders[phase] for phase in ("search", "coding", "verification")
+    )
     pool = pool_of(task.workload)
-    input_targets = {
+    targets = {
         "public": f"/workspace/data/{pool}",
         "calibration": "/home/search/data/S",
         "private": "/root/eval/private",
         "quality": "/root/eval/quality",
     }
-    mounts = [
-        {
-            "type": "bind",
-            "source": str(Path(inputs[key]).resolve()),
-            "target": target,
-            "read_only": True,
-        }
-        for key, target in input_targets.items()
-    ]
-    model_root = Path(assets["root"]).resolve()
-    mounts.append(
-        {"type": "bind", "source": str(model_root), "target": "/models", "read_only": True}
-    )
+    if pool != "S":
+        targets["public_s"] = "/workspace/data/S"
 
-    def container_asset(value):
+    def bind(source: Path | str, target: str, *, read_only: bool = True) -> dict:
+        # Keep the future selected-weights symlink's name in generated Compose.
+        return {
+            "type": "bind",
+            "source": str(Path(source).absolute()),
+            "target": target,
+            "read_only": read_only,
+        }
+
+    metadata_folders = {}
+    for phase in ("search", "coding"):
+        folder = folders[phase] / "reference/metadata"
+        folder.mkdir(parents=True)
+        folder.chmod(0o700)
+        metadata_folders[phase] = folder
+    public_reference = metadata_folders["coding"] / "public.json"
+    public_reference.write_text("{}\n")
+    public_reference.chmod(0o644)
+
+    def container_asset(value, target):
         value = dict(value)
         if value["path"] is not None:
-            value["path"] = str(
-                Path("/models") / Path(value["path"]).resolve().relative_to(model_root)
-            )
-            # Downloaded checkpoints use host paths; native model tags have no
-            # local path and must remain unchanged.
-            checkpoint = Path(value["checkpoint"])
-            value["checkpoint"] = str(
-                Path("/models") / checkpoint.resolve().relative_to(model_root)
-            )
+            source = Path(value["path"]).resolve()
+            checkpoint = Path(value["checkpoint"]).resolve().relative_to(source)
+            value.update(path=target, checkpoint=str(Path(target) / checkpoint))
         return value
 
-    container_assets = {
-        "root": "/models",
-        "source": container_asset(assets["source"]),
-        "baselines": {key: container_asset(value) for key, value in assets["baselines"].items()},
+    source = container_asset(assets["source"], "/models/source")
+    baselines = {
+        name: container_asset(
+            value,
+            "/models/source"
+            if value["path"] == assets["source"]["path"]
+            else f"/models/baselines/{name}",
+        )
+        for name, value in assets["baselines"].items()
     }
+    container_assets = {"root": "/models", "source": source, "baselines": baselines}
+    common = []
+    if assets["source"]["path"] is not None:
+        common.append(bind(assets["source"]["path"], "/models/source"))
+    common.extend(
+        (
+            bind(coding / "environment/task.json", "/root/eval/task.json"),
+            bind(coding / "environment/start.sh", "/opt/eval/start.sh"),
+        )
+    )
+    search_mounts = [
+        *common,
+        bind(inputs["calibration"], targets["calibration"]),
+        bind(metadata_folders["search"], "/root/eval/reference", read_only=False),
+        *(
+            bind(value["path"], baselines[name]["path"])
+            for name, value in assets["baselines"].items()
+            if value["path"] is not None and value["path"] != assets["source"]["path"]
+        ),
+    ]
+    reference = [
+        bind(metadata_folders["coding"], "/root/eval/reference"),
+        bind(coding / "reference/weights", "/models/reference"),
+    ]
+    coding_mounts = [
+        *common,
+        *reference,
+        bind(public_reference, "/workspace/reference.json"),
+        bind(coding / "environment/run.md", "/workspace/run.md"),
+        *(bind(inputs[key], targets[key]) for key in ("public", "public_s") if key in targets),
+    ]
+    verification_mounts = [
+        *common,
+        *reference,
+        *(bind(inputs[key], targets[key]) for key in ("private", "quality")),
+    ]
     metadata = {
         "schema": 1,
         **asdict(task),
         "category": image.category,
         "machine": asdict(machine),
         "image": image.tag,
-        "inputs": input_targets,
+        "inputs": targets,
         "assets": container_assets,
-        "baselines": list(assets["baselines"]),
+        "baselines": list(baselines),
         "agent": asdict(config.agent) if config.agent is not None else None,
         "search": {**asdict(config.search), "calibration_pool": "S"},
         "evaluation": asdict(config.evaluation),
+        "reference": "/root/eval/reference/reference.json",
+        "public_reference": "/root/eval/reference/public.json",
         "candidate": {
-            "user": "agent",
-            "launch": "/workspace/launch.sh",
-            "endpoint": "http://127.0.0.1:8000",
-            "served_model": "served",
+            "submission": "/workspace/submission",
+            "launch": "/workspace/submission/launch.sh",
+            "weights": "/workspace/weights",
+            "runtime": "/workspace/runtime",
+            "endpoint": ENDPOINT,
+            "served_model": SERVED,
         },
     }
-    (environment / "task.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    (environment / "task.json").chmod(0o600)
-    for source, target in (
-        (environment / "task.json", "/root/eval/task.json"),
-        (environment / "start.sh", "/opt/eval/start.sh"),
-        (environment / "run.md", "/workspace/run.md"),
-    ):
-        mounts.append({"type": "bind", "source": str(source), "target": target, "read_only": True})
+    settings = coding / "environment/task.json"
+    settings.write_text(json.dumps(metadata, indent=2) + "\n")
+    settings.chmod(0o600)
     renderer = Environment(
         loader=FileSystemLoader(TEMPLATES), undefined=StrictUndefined, keep_trailing_newline=True
     )
@@ -192,22 +250,45 @@ def render_task(
         "machine": machine,
         "image": image,
         "assets": container_assets,
-        "mounts": mounts,
+        "verification_mounts": verification_mounts,
         "gpu_ids": [gpu.uuid for gpu in machine.gpus],
+        "review_env": {
+            "HOME": "/home/judge",
+            "USER": "judge",
+            "LOGNAME": "judge",
+            "TMPDIR": "/home/judge/tmp",
+            "XDG_CACHE_HOME": "/home/judge/.cache",
+            **{
+                name: "${" + name + "}"
+                for name in reviewer_env(config.evaluation.agent)
+                if name in os.environ
+            },
+        },
     }
-    for template, destination in (
-        ("docker-compose.yaml.j2", environment / "docker-compose.yaml"),
-        ("task.toml.j2", task_folder / "task.toml"),
-        ("search.md", task_folder / "steps/search/instruction.md"),
-        ("coding.md", task_folder / "steps/coding/instruction.md"),
-        ("run.md", environment / "run.md"),
-        ("start.sh", environment / "start.sh"),
-        ("search-test.sh", task_folder / "steps/search/tests/test.sh"),
-        ("coding-test.sh", task_folder / "steps/coding/tests/test.sh"),
-    ):
-        destination.write_text(renderer.get_template(template).render(**values))
+
+    def render(template, destination, **context):
+        destination.write_text(renderer.get_template(template).render(**values, **context))
         if destination.suffix == ".sh":
             destination.chmod(0o755)
-        elif destination.suffix == ".md":
-            destination.chmod(0o644)
-    return task_folder
+
+    render("start.sh", coding / "environment/start.sh")
+    render("run.md", coding / "environment/run.md")
+    for phase, mounts in (("search", search_mounts), ("coding", coding_mounts)):
+        folder = folders[phase]
+        render("task.toml.j2", folder / "task.toml", phase=phase)
+        render(
+            "docker-compose.yaml.j2",
+            folder / "environment/docker-compose.yaml",
+            phase=phase,
+            mounts=mounts,
+        )
+        render(f"{phase}.md", folder / "instruction.md")
+        render(f"{phase}-test.sh", folder / "tests/test.sh")
+        render(f"oracle-{phase}.sh", folder / "solution/solve.sh")
+    render("verification.toml.j2", verification / "task.toml")
+    render("verification-compose.yaml.j2", verification / "environment/docker-compose.yaml")
+    for stage in ("prepare", "review", "measure"):
+        step = verification / "steps" / stage
+        render("verification.md", step / "instruction.md", stage=stage)
+        render("verification-test.sh", step / "tests/test.sh", stage=stage)
+    return coding

@@ -14,7 +14,10 @@ uv run ruff format --check .
 The lockfile fixes runtime, host and development dependencies. Phase 2 puts
 Harbor, Hugging Face datasets/downloads and Jinja rendering in the `host` extra.
 Development includes that extra; the task image installs only the base runtime
-(PyYAML and HTTPX). Add grading dependencies when their implemented modules need them.
+(PyYAML, HTTPX, Math-Verify with its ANTLR runtime, and Harbor Rewardkit).
+Inference extras are not needed for answer grading. The selected Rewardkit
+agent-judge CLI must be available in the supplied image; search/coding
+integrations remain Harbor adapter responsibilities.
 
 ## Scope and tests
 
@@ -29,7 +32,15 @@ local Harbor usage fixture. Do not add large parameter matrices or shared test
 infrastructure for later phases. Phase 3 uses `tests/http_server.py` as a shared
 local HTTP/SSE fixture for its implemented client and measurement tests. Its
 replay tests read the supplied public parquet rows from the sibling
-`edge-harness-v2/local_eval_data/` or `LOCAL_EVAL_DATA` directory.
+`edge-harness-v2/local_eval_data/` or `LOCAL_EVAL_DATA` directory. Phase 4 reuses
+that HTTP fixture for shared quality replay and verifier tests. Its native
+Rewardkit integration is checked with a substituted paid backend; role commands
+and firewall operations use explicit doubles without modifying the host firewall.
+Four opt-in `tests/test_oracle.py` cases also start real Harbor trials in an
+existing production device image with actual Claude Code review. Run them with
+`LOCAL_EVAL_HARBOR_TESTS=1`; they test the lifecycle, permissions and source
+review, rather than model inference or production GPU performance. Native Harbor
+oracle submissions pass the ordinary verification gates.
 Phase 2 checks the actual Harbor task schema and Compose configuration; tests
 replace the job execution boundary rather than starting paid jobs or GPU builds.
 
@@ -51,10 +62,10 @@ contains authored source assets and must remain tracked.
 | --- | --- | --- |
 | 1 | Config, catalogs, baseline metadata, device, metrics, costs | No dataset or image builds |
 | 2 | Setup, model assets, native search/coding task contract, foreground run/resume | Acquisition/rendering fixtures; supplied images/scripts for production builds |
-| 3 | Mapped launch scripts, servers, HTTP clients, recorded replay, measurement (implemented for review) | Supplied local public recordings; CPU and loopback HTTP |
-| 4 | Offline pre-run quality/static gate and timed verifier | Reuse supplied rows |
-| 5 | Harbor adapter coordinator, reference search, trusted handoff, operation logs and coding-only usage | Reuse shared private-S calibration and the Phase 2 step contract; record no search billing |
-| 6 | Harbor and selected device/engine acceptance | Supplied images/scripts and actual target hardware |
+| 3 | Launch, servers, HTTP clients, recorded replay, measurement (committed `efd3650`) | Supplied local public recordings; CPU and loopback HTTP |
+| 4 | Accuracy, fresh verification, conversion/install/freeze, Rewardkit, quality/timing and native Harbor oracle (approved) | Supplied rows, CPU regressions and four opt-in Harbor/Docker trials |
+| 5 | Supplied category Dockerfiles, baseline install/launch scripts and read-only/offline weight assets | Owner-supplied image/script sources and target hardware |
+| 6 | Real native search/coding/verification acceptance: measured tuning, final quality/timing, resume and coding costs | Accepted Phase 5 assets, recorded rows, weight shards and agent credentials |
 
 The separate recording package is added when its implementation starts, after its
 shared server/protocol prerequisites are available.

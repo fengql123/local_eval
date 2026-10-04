@@ -29,9 +29,8 @@ the current foundation APIs; the original commit remains unchanged.
   checkpoint. Setup exposes both to the agent, which may quantize the source.
   Matching identifiers share files; generated `run.md` supplies actual paths.
 - `request_policy.py` formats requests for the candidate and engines defined in
-  `request_fields.json` using the authored OpenAI endpoint policy. The future
-  Apple Silicon LM Studio mappings have no policy yet. No agent tuning or launch
-  environment rules are imposed.
+  `request_fields.json` using the authored OpenAI endpoint policy. No agent tuning
+  or launch environment rules are imposed.
 - Configuration, catalog, file, and evidence parsing use their ordinary native
   errors. There is no duplicate schema audit or defensive recovery layer.
 - Quality uses a fixed S subset as an offline workload. The backend owns batching;
@@ -94,7 +93,7 @@ the source layout; their probes and acceptance remain future work. Production
 Dockerfiles/installers await owner supply. DeepSeek-V4.1-Flash has no NVIDIA mapping
 in the current table.
 
-Phase 2 composes these foundations into host acquisition, shared-container Harbor
+Phase 2 composes these foundations into host acquisition, native Harbor task
 tasks, UUID run folders, and foreground folder-only resume. Its code remains
 approved as one phase commit. Real owner-supplied rows are first needed for Phase 3;
 the dataset's quality is trusted. See [the Phase 2 packet](phase-02.md).
