@@ -1,0 +1,26 @@
+--- a/python/freetoken/tokenizer/tokenize.py
++++ b/python/freetoken/tokenizer/tokenize.py
+@@ -3,6 +3,7 @@
+ import importlib.util
+ import json
+ import os
++import re
+ import threading
+ from copy import deepcopy
+ from types import ModuleType
+@@ -54,6 +55,15 @@
+ class TokenizeManager:
+     def __init__(self, tokenizer: PreTrainedTokenizerBase, mm_processor: MMProcessor | None = None) -> None:
+         self.tokenizer = tokenizer
++        # Recorded histories can contain malformed tool JSON. Preserve its raw
++        # text instead of letting mapping-only Qwen templates reject the request.
++        if isinstance(tokenizer.chat_template, str):
++            tokenizer.chat_template = re.sub(
++                r"{%-?\s*for\s+\w+\s*,\s*\w+\s+in\s+tool_call\.arguments\s*\|\s*items\s*%}.*?{%-?\s*endfor\s*%}",
++                r"{%- if tool_call.arguments is string %}{{- tool_call.arguments }}{%- else %}\g<0>{%- endif %}",
++                tokenizer.chat_template,
++                flags=re.DOTALL,
++            )
+         self.mm_processor = mm_processor  # None: the model takes no images
+         self._dsv4_encoder = _load_dsv4_encoder_if_needed(tokenizer)
+         self._effort_profile: EffortProfile | None = None

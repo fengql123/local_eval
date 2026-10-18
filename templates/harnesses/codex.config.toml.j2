@@ -1,0 +1,20 @@
+model_provider = "record"
+model_context_window = {{ context_window }}
+model_auto_compact_token_limit = {{ context_window - allowance }}
+developer_instructions = {{ prompt_append | tojson }}
+web_search = "disabled"
+
+[model_providers.record]
+name = "record"
+base_url = {{ (url + '/v1') | tojson }}
+wire_api = "responses"
+env_key = "RECORD_API_KEY"
+requires_openai_auth = false
+
+[features]
+view_image = false
+multi_agent = {{ multi | tojson }}
+
+[agents]
+enabled = {{ multi | tojson }}
+max_concurrent_threads_per_session = 4

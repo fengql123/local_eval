@@ -1,69 +1,49 @@
-"""Read-only Phase 1 host checks; no GPU or shared server fixtures required."""
+"""Check required local tools, without probing hardware or starting containers."""
 
-from pathlib import Path
+import subprocess
 
 import pytest
 
-from eval.device import NVIDIA_QUERY, DeviceError, check_environment, inspect_machine
+from eval.device import check_environment, run_command
 
 
-def test_selected_gpu_resolves_authored_device_dockerfile():
-    probes = []
+def test_native_docker_tools_are_checked_without_gpu_inspection():
+    calls = []
 
-    def probe(argv):
-        probes.append(argv)
-        return "9, GPU-nine, NVIDIA A100, 81920"
+    def runner(argv):
+        calls.append(argv)
+        return {"docker": "docker-ready", "harbor": "harbor-ready"}[argv[0]]
 
-    host = inspect_machine(
-        ["9"],
-        runner=probe,
-        system="Linux",
-        architecture="amd64",
-        cpu_cores=32,
-        memory_bytes=256 * 2**30,
-    )
-    assert probes == [(*NVIDIA_QUERY, "--id=9")]
-    assert host.architecture == "x86_64"
-    assert host.memory_gib == 256
-    assert [(gpu.index, gpu.uuid, gpu.memory_gib) for gpu in host.gpus] == [(9, "GPU-nine", 80)]
-    assert host.dockerfile == Path("images/nvidia-cuda-x86/Dockerfile")
+    result = check_environment(runner=runner)
+    assert result.docker_version == result.compose_version == "docker-ready"
+    assert result.harbor_version == "harbor-ready"
+    assert all(argv[0] != "nvidia-smi" for argv in calls)
 
 
-def test_environment_checks_daemon_and_tools_without_starting_containers():
-    replies = {
-        ("docker", "info", "--format", "{{.ServerVersion}}"): "28.0.0",
-        ("docker", "compose", "version", "--short"): "2.39.0",
-        ("harbor", "--version"): "harbor 0.23.0",
-    }
-    probes = []
+def test_command_runner_returns_trimmed_output(monkeypatch):
+    def run(argv, **kwargs):
+        assert kwargs["check"] and kwargs["timeout"] == 15
+        return subprocess.CompletedProcess(argv, 0, " version \n", "")
 
-    def probe(argv):
-        probes.append(argv)
-        return replies[tuple(argv)]
-
-    environment = check_environment(runner=probe)
-    assert environment.docker_version == "28.0.0"
-    assert environment.compose_version == "2.39.0"
-    assert environment.harbor_version == "harbor 0.23.0"
-    assert set(probes) == set(replies)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert run_command(("harbor", "--version")) == "version"
 
 
-def test_unknown_gpu_does_not_fall_back_to_an_available_device():
-    with pytest.raises(KeyError, match="99"):
-        inspect_machine(
-            ["99"],
-            runner=lambda argv: "0, GPU-zero, NVIDIA L40, 46068",
-            system="Linux",
-            architecture="x86_64",
-            cpu_cores=16,
-            memory_bytes=64 * 2**30,
-        )
+def test_missing_tool_error_propagates():
+    def missing(argv):
+        raise FileNotFoundError(argv[0])
+
+    with pytest.raises(FileNotFoundError, match="docker"):
+        check_environment(runner=missing)
 
 
-def test_unimplemented_host_fails_before_hardware_probe():
-    with pytest.raises(DeviceError, match="unsupported host"):
-        inspect_machine(
-            runner=lambda argv: pytest.fail("must not probe an unsupported host"),
-            system="Darwin",
-            architecture="arm64",
-        )
+def test_daemon_failure_stops_before_later_checks():
+    calls = []
+
+    def broken(argv):
+        calls.append(argv)
+        raise subprocess.CalledProcessError(1, argv)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        check_environment(runner=broken)
+    assert len(calls) == 1

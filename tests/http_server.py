@@ -18,6 +18,11 @@ async def server(respond):
                     b'HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{"data": [{"id": "served"}]}'
                 )
                 await writer.drain()
+            elif headers.startswith("GET "):
+                writer.write(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
             else:
                 length = next(
                     int(line.split(":", 1)[1])

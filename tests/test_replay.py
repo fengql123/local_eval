@@ -1,8 +1,4 @@
-"""Two ordinary scheduling cases and two unlimited/cancellation edge cases using the supplied local recordings.
-
-Set LOCAL_EVAL_DATA to their root, or keep them in sibling
-edge-harness-v2/local_eval_data. Prepared rows are consumed without schema audits.
-"""
+"""Prepared DAG scheduling and cancellation. Durable batching has its own four tests."""
 
 import asyncio
 import copy
@@ -12,245 +8,147 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from eval.bench.replay import ReplayError, replay
+from eval.bench.replay import ReplayError, failure_records, replay
 
 
 def recordings(pool):
-    default = Path(__file__).resolve().parents[2] / "edge-harness-v2" / "local_eval_data"
-    source = Path(os.environ.get("LOCAL_EVAL_DATA", default))
-    return pq.read_table(source / pool / "public-00000-of-00001.parquet").to_pylist()
-
-
-class ControlledClient:
-    def __init__(self, requests):
-        self.started = {request["id"]: asyncio.Event() for request in requests}
-        self.release = {request["id"]: asyncio.Event() for request in requests}
-        self.done = set()
-        self.parents_at_start = {}
-        self.clock = 0
-
-    async def request(self, request, workload):
-        request_id = request["id"]
-        self.parents_at_start[request_id] = set(self.done)
-        self.started[request_id].set()
-        await self.release[request_id].wait()
-        self.done.add(request_id)
-        self.clock += 1
-        return {"ok": True, "errors": [], "t_end": self.clock, "text": "server reply"}
-
-
-def test_recorded_chain_fork_and_join_wait_for_parents_and_tool_delays():
-    async def exercise(row, workload, concurrency=None):
-        client = ControlledClient(row["requests"])
-        delays = []
-
-        async def sleep(delay):
-            delays.append((delay, set(client.done)))
-
-        task = asyncio.create_task(
-            replay([row], workload, client, concurrency=concurrency, sleep=sleep)
+    source = Path(
+        os.environ.get("LOCAL_EVAL_DATA", Path(__file__).resolve().parents[1] / "data/dataset")
+    )
+    return [
+        r
+        for r in pq.read_table(source / "workloads/Qwen3.6-35B-A3B.parquet").to_pylist()
+        if any(
+            w in r["public"]
+            for w in {"S": ("S-1", "S-N"), "A": ("A-1", "A-N"), "A-MA": ("A-MA",)}[pool]
         )
-        if workload == "A-MA":
-            for request_id in [0, 1]:
-                await asyncio.wait_for(client.started[request_id].wait(), 1)
-                client.release[request_id].set()
-            for request_id in [2, 3, 4]:
-                await asyncio.wait_for(client.started[request_id].wait(), 1)
-            assert not client.started[12].is_set()
-            for request_id in [2, 6, 8, 11]:
-                client.release[request_id].set()
-                await asyncio.wait_for(client.started[request_id].wait(), 1)
-            await asyncio.sleep(0)
-            assert 11 in client.done
-            assert not client.started[12].is_set()
-            client.release[3].set()
-            await asyncio.sleep(0)
-            assert not client.started[12].is_set()
-            client.release[4].set()
-            await asyncio.wait_for(client.started[12].wait(), 1)
-            assert {3, 4, 11} <= client.parents_at_start[12]
-        for event in client.release.values():
-            event.set()
-        records = await asyncio.wait_for(task, 1)
-        assert [record["request_id"] for record in records] == [
-            request["id"] for request in row["requests"]
-        ]
-        assert all(record["row_id"] == row["id"] for record in records)
+    ]
+
+
+def test_real_recorded_graphs_preserve_payloads_and_parent_dependencies():
+    async def scenario(pool, workload):
+        row = min(recordings(pool), key=lambda x: len(x["requests"]))
+        # This case tests captured payloads and DAG edges; tool scheduling is below.
         for request in row["requests"]:
-            assert set(request["parents"]) <= client.parents_at_start[request["id"]]
-            if request["tool"]:
-                assert any(
-                    delay == request["tool"] and set(request["parents"]) <= done
-                    for delay, done in delays
-                )
-
-    async def main():
-        await exercise(recordings("A")[0], "A-N")
-        await exercise(recordings("A-MA")[0], "A-MA")
-
-    asyncio.run(main())
-
-
-def test_workload_session_limits_preserve_requests_and_a1_omits_delays():
-    async def exercise(workload, rows, limit, concurrency=None):
-        before = copy.deepcopy(rows)
-        originals = {id(request) for row in rows for request in row["requests"]}
-        released = asyncio.Event()
-        batch_ready = asyncio.Event()
-        active, peak, started = 0, 0, 0
-        delays = []
+            request["tool"] = 0
+        original = copy.deepcopy(row)
+        done = set()
 
         class Client:
-            async def request(self, request, received_workload):
-                nonlocal active, peak, started
-                assert received_workload == workload
-                assert id(request) in originals
-                active += 1
-                started += 1
-                peak = max(peak, active)
-                if started == limit:
-                    batch_ready.set()
-                await released.wait()
-                active -= 1
-                return {"ok": True, "text": "fresh answer"}
+            async def request(self, request, _):
+                assert set(request["parents"]) <= done
+                await asyncio.sleep(0)
+                done.add(request["id"])
+                return {"ok": True, "errors": [], "text": "fresh"}
 
-        async def sleep(delay):
-            delays.append(delay)
+        records = await replay([row], workload, Client())
+        assert row == original
+        assert [r["request_id"] for r in records] == [r["id"] for r in row["requests"]]
 
-        task = asyncio.create_task(
-            replay(rows, workload, Client(), concurrency=concurrency, sleep=sleep)
-        )
-        await asyncio.wait_for(batch_ready.wait(), 1)
-        await asyncio.sleep(0)
-        assert started == limit
-        released.set()
-        records = await asyncio.wait_for(task, 1)
-        assert peak == limit
-        assert rows == before
-        assert [(record["row_id"], record["request_id"]) for record in records] == [
-            (row["id"], request["id"]) for row in rows for request in row["requests"]
-        ]
-        assert all(record["text"] == "fresh answer" for record in records)
-        if workload == "A-1":
-            assert delays == []
-        if workload == "A-MA":
-            assert delays == [
-                request["tool"] for row in rows for request in row["requests"] if request["tool"]
-            ]
-
-    async def main():
-        singles = recordings("S")[:10]
-        chains = recordings("A")[:2]
-        await exercise("S-1", singles, 1)
-        await exercise("S-N", singles, 10)
-        await exercise("S-1", singles, 2, concurrency=2)
-        await exercise("S-N", singles, 2, concurrency=2)
-        await exercise("A-N", singles, 8)
-        await exercise("A-1", chains, 1)
-        await exercise("A-MA", chains, 1)
-
-    asyncio.run(main())
+    for pool, workload in (("A", "A-1"), ("A-MA", "A-MA")):
+        asyncio.run(scenario(pool, workload))
 
 
-def two_requests():
-    return [{"id": "session", "requests": [{"id": i, "parents": [], "tool": 0}]} for i in range(2)]
-
-
-def test_failed_stream_cancels_blocked_sibling_and_retains_failure_evidence():
-    async def exercise():
-        blocked = asyncio.Event()
-        cancelled = asyncio.Event()
-
-        class Client:
-            async def request(self, request, workload):
-                if request["id"] == 0:
-                    await blocked.wait()
-                    return {"ok": False, "errors": ["missing final usage"], "text": "partial"}
-                blocked.set()
-                try:
-                    await asyncio.Future()
-                finally:
-                    cancelled.set()
-
-        with pytest.raises(ExceptionGroup) as failure:
-            await replay(two_requests(), "S-N", Client())
-        error = failure.value.exceptions[0].exceptions[0]
-        assert isinstance(error, ReplayError)
-        assert error.record == {
-            "ok": False,
-            "errors": ["missing final usage"],
-            "text": "partial",
-            "row_id": "session",
-            "request_id": 0,
-        }
-        assert cancelled.is_set()
-
-    asyncio.run(exercise())
-
-    async def exercise():
-        both_started = asyncio.Event()
-        active = set()
-        cancelled = set()
-
-        class Client:
-            async def request(self, request, workload):
-                active.add(request["id"])
-                if len(active) == 2:
-                    both_started.set()
-                try:
-                    await asyncio.Future()
-                finally:
-                    active.remove(request["id"])
-                    cancelled.add(request["id"])
-
-        task = asyncio.create_task(replay(two_requests(), "S-N", Client()))
-        await asyncio.wait_for(both_started.wait(), 1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert active == set()
-        assert cancelled == {0, 1}
-
-    asyncio.run(exercise())
-
-
-def test_unlimited_admits_all_rows_and_preserves_parent_dependencies():
+def test_serial_sessions_finish_before_the_next_starts():
     async def scenario():
-        selected = recordings("S")[:10]
-        all_started = asyncio.Event()
-        release = asyncio.Event()
-        started = 0
+        selected = recordings("S")[:2]
+        started = []
 
         class Client:
-            async def request(self, request, workload):
-                nonlocal started
-                started += 1
-                if started == len(selected):
-                    all_started.set()
-                await release.wait()
-                return {"ok": True, "text": "answer"}
+            async def request(self, request, _):
+                started.append(request["messages"])
+                await asyncio.sleep(0)
+                return {"ok": True, "errors": []}
 
-        task = asyncio.create_task(replay(selected, "S-1", Client(), concurrency=-1))
-        await asyncio.wait_for(all_started.wait(), 1)
-        assert started == len(selected)
-        release.set()
-        assert len(await task) == len(selected)
-        for invalid in (0, -2):
-            with pytest.raises(ValueError, match="concurrency"):
-                await replay(selected, "S-1", Client(), concurrency=invalid)
-
-        # An unlimited session limit never removes the recorded graph edges.
-        row = recordings("A-MA")[0]
-        client = ControlledClient(row["requests"])
-        task = asyncio.create_task(
-            replay([row], "A-MA", client, concurrency=-1, sleep=lambda _delay: asyncio.sleep(0))
-        )
-        await asyncio.wait_for(client.started[0].wait(), 1)
-        assert not client.started[1].is_set()
-        for event in client.release.values():
-            event.set()
-        await asyncio.wait_for(task, 1)
-        for request in row["requests"]:
-            assert set(request["parents"]) <= client.parents_at_start[request["id"]]
+        records = await replay(selected, "S-1", Client())
+        assert [r["row_id"] for r in records] == [r["id"] for r in selected]
+        assert started == [r["requests"][0]["messages"] for r in selected]
 
     asyncio.run(scenario())
+
+
+def test_a_failed_stream_cancels_its_graph_siblings():
+    row = {"id": "fork", "requests": [{"id": i, "parents": []} for i in range(2)]}
+    cancelled = []
+
+    async def scenario():
+        class Client:
+            async def request(self, request, _):
+                if request["id"] == 0:
+                    await asyncio.sleep(0)
+                    return {"ok": False, "errors": ["broken stream"]}
+                try:
+                    await asyncio.sleep(10)
+                finally:
+                    cancelled.append(1)
+
+        with pytest.raises(ExceptionGroup) as failure:
+            await replay([row], "A-MA", Client())
+        assert failure.group_contains(ReplayError)
+        assert failure_records(failure.value)[0]["errors"] == ["broken stream"]
+        assert cancelled == [1]
+
+    asyncio.run(scenario())
+
+
+def test_quality_can_admit_all_independent_rows():
+    async def scenario():
+        selected = recordings("S")[:8]
+        ready = asyncio.Event()
+        count = 0
+
+        class Client:
+            async def request(self, request, _):
+                nonlocal count
+                count += 1
+                if count == 8:
+                    ready.set()
+                await asyncio.wait_for(ready.wait(), 1)
+                return {"ok": True, "errors": []}
+
+        assert len(await replay(selected, "S-1", Client(), quality=True, concurrency=-1)) == 8
+
+    asyncio.run(scenario())
+
+
+def tool_case(monkeypatch, workload, parents):
+    """Observe scheduling waits without spending the recorded wall time."""
+    original_sleep = asyncio.sleep
+    waits, done = [], set()
+
+    async def wait(seconds):
+        if seconds:
+            waits.append(seconds)
+        await original_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", wait)
+    requests = [
+        {"id": i, "parents": dependencies, "tool": i / 10} for i, dependencies in enumerate(parents)
+    ]
+
+    class Client:
+        async def request(self, request, _):
+            assert set(request["parents"]) <= done
+            done.add(request["id"])
+            return {"ok": True, "errors": []}
+
+    rows = [{"id": str(i), "requests": requests} for i in range(8 if workload == "A-N" else 1)]
+    asyncio.run(replay(rows, workload, Client()))
+    return waits
+
+
+def test_a_n_replays_waits_in_each_of_its_n_sessions(monkeypatch):
+    assert tool_case(monkeypatch, "A-N", [[], [0]]) == [0.1] * 8
+
+
+def test_branched_a_ma_waits_after_forks_and_joins(monkeypatch):
+    assert sorted(tool_case(monkeypatch, "A-MA", [[], [0], [0], [1, 2]])) == [0.1, 0.2, 0.3]
+
+
+def test_linear_a_ma_skips_waits_even_with_a_redundant_ancestor_edge(monkeypatch):
+    assert tool_case(monkeypatch, "A-MA", [[], [0], [0, 1]]) == []
+
+
+def test_serial_and_single_turn_workloads_ignore_tool_metadata(monkeypatch):
+    assert tool_case(monkeypatch, "A-1", [[], [0]]) == []
+    assert tool_case(monkeypatch, "S-1", [[], [0]]) == []

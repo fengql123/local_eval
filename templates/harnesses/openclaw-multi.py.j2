@@ -1,0 +1,116 @@
+"""Run a native multi-agent session through child execution and announcement settlement."""
+
+import asyncio
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+CONFIG = Path({{ config | tojson }})
+WORKSPACE = {{ workspace | tojson }}
+PORT = {{ port }}
+SESSION = {{ session | tojson }}
+RULE = {{ prompt_append | tojson }}
+
+
+def prepare_instructions():
+    original = Path(WORKSPACE) / "AGENTS.md"
+    text = original.read_bytes() if original.exists() else b""
+    scope = ("\n\n## Recording workload\n"
+             "The following rule applies to the main session only. Spawned sub-agents "
+             "complete their assigned subtask instead of recursively applying this rule.\n")
+    (CONFIG / "AGENTS.md").write_bytes(text + (scope + RULE + "\n").encode())
+
+
+def children():
+    database = CONFIG / "state" / "openclaw.sqlite"
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        query = """SELECT payload_json, task_runs.status FROM subagent_runs
+                   LEFT JOIN task_runs ON task_runs.runtime = 'subagent' AND task_runs.run_id =
+                   COALESCE(json_extract(payload_json, '$.taskRunId'), subagent_runs.run_id)"""
+        return [{**json.loads(payload), "task_status": status}
+                for payload, status in connection.execute(query)]
+
+
+def succeeded(entry):
+    execution = entry["execution"]
+    return (entry["task_status"] == "succeeded" and execution["status"] == "terminal"
+            and execution.get("startedAt") is not None and execution.get("endedAt") is not None
+            and execution.get("outcome", {}).get("status") == "ok")
+
+
+def pending(entries):
+    for entry in entries:
+        if entry["execution"]["status"] != "terminal" or entry.get("requesterSettleWake") is not None:
+            return True
+        if entry.get("cleanupCompletedAt") is not None:
+            continue
+        delivery = entry["delivery"]
+        # Native suspended delivery is retained for seven days, after execution has succeeded.
+        if not (succeeded(entry) and delivery["status"] == "suspended"
+                and delivery.get("disposition") == "permanent_failure"
+                and delivery.get("suspendedAt") is not None):
+            return True
+    return False
+
+
+async def run():
+    prepare_instructions()
+    with (CONFIG / "gateway.log").open("wb") as stream:
+        gateway = await asyncio.create_subprocess_exec(
+            "openclaw", "gateway", "--port", str(PORT), "--allow-unconfigured",
+            cwd=WORKSPACE, stdout=stream, stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            while gateway.returncode is None:
+                try:
+                    _, writer = await asyncio.open_connection("127.0.0.1", PORT)
+                except OSError:
+                    await asyncio.sleep(0.1)
+                else:
+                    writer.close()
+                    await writer.wait_closed()
+                    break
+            else:
+                raise RuntimeError(f"OpenClaw gateway exited with status {gateway.returncode}")
+            agent = await asyncio.create_subprocess_exec(
+                "openclaw", "agent", "--json", "--session-id", SESSION, "--message", sys.argv[1],
+                cwd=WORKSPACE,
+            )
+            status = await agent.wait()
+            if status:
+                raise RuntimeError(f"OpenClaw agent exited with status {status}")
+            while gateway.returncode is None:
+                if not pending(children()):
+                    process = await asyncio.create_subprocess_exec(
+                        "openclaw", "gateway", "call", "sessions.list", "--json", "--params", "{}",
+                        cwd=WORKSPACE, stdout=asyncio.subprocess.PIPE,
+                    )
+                    stdout, _ = await process.communicate()
+                    if process.returncode:
+                        raise RuntimeError(f"OpenClaw sessions.list exited with status {process.returncode}")
+                    sessions = json.loads(stdout)["sessions"]
+                    entries = children()
+                    if not any(s.get("hasActiveRun") or s.get("activeRunIds") for s in sessions) and not pending(entries):
+                        count = len({row["childSessionKey"] for row in entries if succeeded(row)})
+                        runs = [{key: row[key] for key in
+                                 ("runId", "childSessionKey", "task_status", "execution", "delivery", "requesterSettleWake")
+                                 if key in row} for row in entries]
+                        (CONFIG / "children.json").write_text(json.dumps({
+                            "count": count, "root_exit_code": status, "runs": runs,
+                        }) + "\n")
+                        return
+                await asyncio.sleep(0.1)
+            raise RuntimeError(f"OpenClaw gateway exited with status {gateway.returncode}")
+        finally:
+            if gateway.returncode is None:
+                gateway.terminate()
+                try:
+                    await asyncio.wait_for(gateway.wait(), 3)
+                except TimeoutError:
+                    gateway.kill()
+                    await gateway.wait()
+
+
+if __name__ == "__main__":
+    asyncio.run(run())

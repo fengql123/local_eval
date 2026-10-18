@@ -1,0 +1,27 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": {{ (config if multi else workspace) | tojson }},
+      "cwd": {{ workspace | tojson }},
+      "model": {"primary": "record/served"},
+      "compaction": {"midTurnPrecheck": {"enabled": true}},
+      "subagents": {"maxConcurrent": 4, "maxChildrenPerAgent": 4, "maxSpawnDepth": 1}
+    }
+  },
+  "models": {
+    "providers": {
+      "record": {
+        "baseUrl": {{ (url + '/v1') | tojson }},
+        "apiKey": "local",
+        "api": "openai-completions",
+        "models": [{"id": "served", "name": "served", "contextWindow": {{ context_window }}, "contextTokens": {{ context_window - allowance }}, "maxTokens": {{ allowance }}}]
+      }
+    }
+  },
+  "tools": {"deny": {{ ([] if multi else ['sessions_spawn']) | tojson }}},
+  "gateway": {
+    "mode": "local",
+    "auth": {"mode": "token", "token": "local-record"}{% if multi %},
+    "port": {{ port }}{% endif %}
+  }
+}

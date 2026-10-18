@@ -1,0 +1,42 @@
+dataset: /home/qilongf/local_eval/data/dataset
+concurrency: 8
+max_retries: 10
+environment:
+  provider: daytona
+  device_category: nvidia-cuda-x86
+  cpus: 16
+  memory_mb: 131072
+  storage_mb: 524288
+  kwargs:
+    gpus: 1
+    gpu_types:
+    - RTX-PRO-6000
+    spot: true
+    auto_stop_interval_mins: 0
+    auto_delete_interval_mins: 0
+    cpu_prefixes:
+    - AMD EPYC 9335
+    - AMD EPYC 9355
+    - AMD EPYC 9455
+    - AMD EPYC 9555
+    - AMD EPYC 9B45
+    auto_snapshot: false
+tasks:
+  models: all
+  workloads: all
+agent: &id001
+  name: claude-code
+  model: claude-opus-5-5
+  kwargs:
+    reasoning_effort: xhigh
+  budget: 24h
+search:
+  reference: /home/qilongf/local_eval/runs/ac700d9f-0fb8-4eca-b076-3b80843baef4/provided-reference
+  agent: *id001
+evaluation:
+  concurrency:
+    S-N: 32
+    A-N: 8
+  agent: *id001
+  quality_timeout: 5h
+out: runs

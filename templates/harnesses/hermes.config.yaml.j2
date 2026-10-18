@@ -1,0 +1,24 @@
+model:
+  default: served
+  provider: custom
+  base_url: {{ (url + '/v1') | tojson }}
+  api_mode: chat_completions
+  context_length: {{ context_window }}
+terminal:
+  backend: local
+  cwd: {{ workspace | tojson }}
+agent:
+  coding_context: "off"
+  disabled_toolsets: {{ ([] if multi else ['delegation']) | tojson }}
+delegation:
+  max_concurrent_children: 4
+  oneshot_max_children: 4
+  max_spawn_depth: 1
+  orchestrator_enabled: false
+compression:
+  threshold_tokens: {{ context_window - allowance }}
+auxiliary:
+  compression:
+    provider: main
+    base_url: {{ (url + '/v1') | tojson }}
+    model: served

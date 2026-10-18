@@ -8,8 +8,9 @@ paid call happens here: estimates require an explicit model rate table.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -89,6 +90,36 @@ def _context_usage(context: Mapping[str, Any]) -> Usage:
         context.get("n_output_tokens"),
         cost,
         "reported" if cost is not None else "unknown",
+    )
+
+
+def with_claude_cost(attempt: Attempt, stream: Path) -> Attempt:
+    """Use the CLI's reported list cost; Harbor can default absent step costs to zero."""
+    if attempt.agent_name != "claude-code":
+        return attempt
+    cost = None
+    if stream.is_file():
+        for line in reversed(stream.read_text().split("\n")):
+            if not line.rstrip().endswith("}") or not re.search(r'"type"\s*:\s*"result"', line):
+                continue
+            match = re.search(
+                r'"total_cost_usd"\s*:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)',
+                line,
+            )
+            if match:
+                cost = float(match[1])
+                break
+    if cost is None and attempt.usage.cost_usd != 0:
+        return attempt
+    return replace(
+        attempt,
+        usage=replace(
+            attempt.usage, cost_usd=cost, cost_kind="reported" if cost is not None else "unknown"
+        ),
+        usage_source=attempt.usage_source
+        + "+claude-code."
+        + ("result" if cost is not None else "missing-cost"),
+        evidence=(*attempt.evidence, str(stream)) if stream.is_file() else attempt.evidence,
     )
 
 
@@ -249,8 +280,14 @@ def write_ledger(path: str | Path, attempts: Iterable[Attempt]) -> None:
 
 
 def update_ledger(path: str | Path, attempts: Iterable[Attempt]) -> tuple[Attempt, ...]:
-    """Merge new finalized attempts and save them before trial cleanup."""
+    """Finalize provisional usage once, retaining distinct retry trials."""
     merged = merge_attempts(read_ledger(path), attempts)
+    finalized = {a.trial_name for a in merged if not a.attempt_id.startswith("interrupted:")}
+    merged = tuple(
+        a
+        for a in merged
+        if not (a.attempt_id.startswith("interrupted:") and a.trial_name in finalized)
+    )
     write_ledger(path, merged)
     return merged
 
@@ -271,8 +308,11 @@ def collect_trial(
         trajectory_path = Path(trajectory_path)
         trajectory = json.loads(trajectory_path.read_text())
         evidence.append(str(trajectory_path))
-    return from_harbor_result(
-        result, trajectory=trajectory, role=role, prices=prices, evidence=evidence
+    return with_claude_cost(
+        from_harbor_result(
+            result, trajectory=trajectory, role=role, prices=prices, evidence=evidence
+        ),
+        result_path.parent / "agent/claude-code.txt",
     )
 
 

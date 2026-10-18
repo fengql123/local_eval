@@ -5,9 +5,11 @@ __pycache__/
 .ruff_cache/
 dist/
 *.egg-info/
-# Generated data and run artifacts never belong in source control.
-models/
-runs/
+# Generated benchmark data and execution state.
+/runs
+/data
+# Temporary compatibility link for retained pre-migration operators.
+/artifacts
 .env
 .env.*
 !.env.example

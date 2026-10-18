@@ -1,69 +1,139 @@
-"""Publish the chosen mapped baseline and adjustable launch parameters."""
+"""Publish the chosen mapped baseline and adjustable launch parameters.
+
+Search may instead report that no mapped baseline serves the model on this
+device, which makes the pair an SLO task on FreeToken's checkpoint. The verdict
+keeps bounded log tails from every attempt for audit.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import os
+import stat
 from pathlib import Path
 
+from ..baselines import FIXED_ENV, FIXED_OPTIONS, RECIPES
 from ..launch import Launch
 
+STAGES = ("precheck", "install", "acquire", "launch", "serve")
+SEARCH_UID = 1002
+LOG_ROOTS = (Path("/home/search"), Path("/workspace"))
+LOG_LIMIT = 64 * 1024
+MAX_ATTEMPTS = 32
 
-def finalize(task: dict, selection: Path, *, images: Path = Path("/opt/eval/images")) -> dict:
-    """Resolve weights from trusted task metadata, never the agent's weight path.
 
-    Search writes a baseline and args/env, or a bench report with parameters.
-    Physical checkpoints are mounted at /models/reference in subsequent jobs.
-    The selected scripts remain the protected versions supplied by the image.
-    """
+def _tail(source: str, destination: Path, *, uid: int, roots: tuple[Path, ...]) -> str:
+    """Copy the end of a search-owned regular file without following a final link."""
+    path = Path(source).resolve()
+    if not any(path.is_relative_to(root) for root in roots):
+        raise ValueError(f"log {source} is outside {', '.join(map(str, roots))}")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle:
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode) or status.st_uid != uid:
+            raise ValueError(f"log {source} is not a regular file owned by search")
+        handle.seek(max(0, status.st_size - LOG_LIMIT))
+        destination.write_bytes(handle.read(LOG_LIMIT))
+    destination.chmod(0o644)
+    return destination.name
+
+
+def verdict(
+    task: dict,
+    chosen: dict,
+    output: Path,
+    *,
+    uid: int = SEARCH_UID,
+    roots: tuple[Path, ...] = LOG_ROOTS,
+) -> dict:
+    """Validate an unsupported verdict; every mapped baseline needs a failed attempt."""
+    mapped = task["assets"]["baselines"]
+    attempts = chosen.get("attempts")
+    if not isinstance(attempts, list) or not 0 < len(attempts) <= MAX_ATTEMPTS:
+        raise ValueError(f"an unsupported verdict needs 1-{MAX_ATTEMPTS} attempts")
+    if not all(isinstance(attempt, dict) for attempt in attempts):
+        raise ValueError("each attempt must be an object")
+    tried = {attempt.get("baseline") for attempt in attempts}
+    if tried != set(mapped):
+        raise ValueError(f"attempts must cover each mapped baseline {sorted(mapped)} only")
+    folder = output.parent / "attempts"
+    folder.mkdir(exist_ok=True)
+    published = []
+    for number, attempt in enumerate(attempts):
+        if attempt.get("stage") not in STAGES:
+            raise ValueError(f"attempt stage must be one of {', '.join(STAGES)}")
+        error = attempt.get("error")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("each attempt needs a non-empty error")
+        entry = {key: attempt[key] for key in ("baseline", "stage")} | {"error": error[:4096]}
+        log = attempt.get("log")
+        entry["log"] = None
+        if log is not None:
+            name = f"{number:02d}-{attempt['baseline']}-{attempt['stage']}.log"
+            try:
+                entry["log"] = "attempts/" + _tail(str(log), folder / name, uid=uid, roots=roots)
+            except (OSError, ValueError) as failure:
+                # Missing evidence is reported; the stated error remains the verdict.
+                entry["log_error"] = f"{type(failure).__name__}: {failure}"
+        published.append(entry)
+    return {"supported": False, "attempts": published}
+
+
+def finalize(task: dict, selection: Path, *, recipes: Path = RECIPES, **options) -> dict:
+    """Publish only a mapped baseline and adjustable parameters, never local weights."""
     chosen = json.loads(selection.read_text())
-    baseline = chosen["baseline"]
-    if baseline not in task["assets"]["baselines"]:
-        raise ValueError(f"baseline {baseline!r} is not mapped for {task['model']}")
-    asset = task["assets"]["baselines"][baseline]
-    params = chosen.get("parameters", chosen)
-    script = images / task["category"] / "baselines" / baseline / "launch.sh"
-    launch = Launch(
-        script,
-        asset["checkpoint"],
-        tuple(params.get("args", ())),
-        dict(params.get("env", {})),
-        fixed_env=frozenset({"HOME", "USER", "LOGNAME"}),
-    )
-    launch.prepare()
-    reference = {
-        "category": task["category"],
-        "model": task["model"],
-        "baseline": baseline,
-        "checkpoint": "/models/reference" if asset["path"] is not None else asset["checkpoint"],
-        "args": list(launch.args),
-        "env": launch.env,
-    }
-    for name in ("reference", "public_reference"):
-        output = Path(task[name])
-        output.write_text(json.dumps(reference, indent=2) + "\n")
-        output.chmod(0o644)
+    if not isinstance(chosen, dict):
+        raise TypeError("selection.json must contain an object")
+    supported = chosen.get("supported", True)
+    if type(supported) is not bool:
+        raise TypeError("supported must be true or false")
+    output = Path(task["reference"])
+    if not supported:
+        reference = verdict(task, chosen, output, **options)
+    else:
+        baseline = chosen["baseline"]
+        if baseline not in task["assets"]["baselines"]:
+            raise ValueError(f"baseline {baseline!r} is not mapped for {task['model']}")
+        asset = task["assets"]["baselines"][baseline]
+        params = chosen.get("parameters", chosen)
+        script = recipes / task["device_category"] / baseline / "launch.sh"
+        launch = Launch(
+            script,
+            asset,
+            tuple(params.get("args", ())),
+            dict(params.get("env", {})),
+            fixed_options=FIXED_OPTIONS.get(baseline, frozenset()),
+            fixed_env=FIXED_ENV.get(baseline, frozenset()) | {"HOME", "USER", "LOGNAME"},
+        )
+        launch.prepare()
+        reference = {
+            "baseline": baseline,
+            "args": list(launch.args),
+            "env": launch.env,
+        }
+    output.write_text(json.dumps(reference, indent=2) + "\n")
+    output.chmod(0o644)
     return reference
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", type=Path, default=Path("/root/eval/task.json"))
+    parser.add_argument("--task", type=Path, default=Path("/var/lib/local-eval/task.json"))
     parser.add_argument("--stage", choices=("collect", "gate"), required=True)
     args = parser.parse_args(argv)
     task = json.loads(args.task.read_text())
     report_path = Path(task["reference"]).with_name("report.json")
     if args.stage == "collect":
-        # A cancelled attempt can leave outputs in this persistent root bind.
-        for output in (report_path, Path(task["reference"]), Path(task["public_reference"])):
+        # A cancelled attempt can leave outputs before the native artifact handoff.
+        for output in (report_path, Path(task["reference"])):
             output.unlink(missing_ok=True)
-        # Native single-step Harbor collects artifacts before its verifier.
-        # Stop search-owned servers, then publish the trusted reference once.
-        cleanup = subprocess.run(["pkill", "-KILL", "-u", "search"])
-        if cleanup.returncode not in (0, 1):
-            raise RuntimeError(f"could not stop search processes: {cleanup.returncode}")
-        selection = Path("/home/search/selection.json")
+        attempts = Path(task["reference"]).with_name("attempts")
+        if attempts.is_dir():
+            for path in attempts.iterdir():
+                path.unlink()
+        # Native Harbor collects artifacts before its verifier and owns cleanup.
+        selection = Path("/workspace/output/selection.json")
         try:
             reference = finalize(task, selection)
         except (ValueError, KeyError, TypeError, FileNotFoundError) as error:

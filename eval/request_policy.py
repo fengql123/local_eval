@@ -12,6 +12,13 @@ def pool_of(workload: str) -> str:
     return WORKLOAD_POOL[workload]
 
 
+def matches_workload(
+    row: dict, workload: str, *, split: str = "public", scoped: bool = False
+) -> bool:
+    """Select a row's membership; scoped sandbox views are already selected."""
+    return scoped or workload in row[split]
+
+
 @dataclass
 class RequestPolicy:
     model: str

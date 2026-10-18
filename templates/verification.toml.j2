@@ -6,11 +6,18 @@ name = {{ ("local-eval-verification/" + task.task_id) | tojson }}
 description = {{ ("Fresh verification of " + task.model + ": " + task.workload) | tojson }}
 
 [environment]
-docker_image = {{ image.tag | tojson }}
 build_timeout_sec = {{ config.evaluation.install_timeout_seconds }}
-cpus = {{ machine.cpu_cores }}
-memory_mb = {{ machine.memory_bytes // 1048576 }}
-gpus = {{ machine.gpus | length }}
+cpus = {{ config.environment.cpus }}
+memory_mb = {{ config.environment.memory_mb }}
+{% if config.environment.provider != "docker" %}
+storage_mb = {{ config.environment.storage_mb }}
+{% if "gpus" in config.environment.kwargs %}
+gpus = {{ config.environment.kwargs.gpus }}
+{% endif %}
+{% if "gpu_types" in config.environment.kwargs %}
+gpu_types = {{ config.environment.kwargs.gpu_types | tojson }}
+{% endif %}
+{% endif %}
 workdir = "/workspace"
 
 [environment.healthcheck]
@@ -41,6 +48,7 @@ timeout_sec = {{ config.evaluation.install_timeout_seconds * 2 + 600 }}
 [[steps]]
 name = "review"
 min_reward = 1
+artifacts = ["/workspace/.harbor/reviewer-history"]
 
 [steps.agent]
 user = "judge"
@@ -55,6 +63,67 @@ timeout_sec = {{ config.evaluation.agent.budget_seconds + 120 }}
 {% for name, value in review_env.items() %}
 {{ name }} = {{ value | tojson }}
 {% endfor %}
+{% if config.evaluation.agent.name == "claude-code" and config.evaluation.agent.kwargs.get("reasoning_effort") %}
+CLAUDE_CODE_EFFORT_LEVEL = {{ config.evaluation.agent.kwargs.reasoning_effort | tojson }}
+{% endif %}
+
+[[steps]]
+name = "quality"
+min_reward = 1
+
+[steps.agent]
+user = "root"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "root"
+network_mode = "no-network"
+# Quality has its own deadline; allow startup and bounded cleanup outside it.
+timeout_sec = {{ config.evaluation.quality_timeout_seconds + config.evaluation.health_timeout_seconds + 120 }}
+{% if task.type == "SLO" %}
+
+[[steps]]
+name = "slo"
+
+[steps.agent]
+user = "root"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "root"
+network_mode = "no-network"
+# Each repeat: startup, one warmup bounded at 300 s, then the SLO budget.
+timeout_sec = {{ (config.evaluation.slo_budget_seconds + config.evaluation.health_timeout_seconds + 300 + config.evaluation.slo_request_cap_seconds) * config.evaluation.slo_repeats + 3600 }}
+{% else %}
+
+[[steps]]
+name = "reference-prepare"
+min_reward = 1
+
+[steps.agent]
+user = "root"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "root"
+timeout_sec = {{ config.evaluation.install_timeout_seconds + 600 }}
+
+[[steps]]
+name = "reference"
+min_reward = 1
+
+[steps.agent]
+user = "root"
+timeout_sec = 60
+
+[steps.verifier]
+environment_mode = "shared"
+user = "root"
+network_mode = "no-network"
+timeout_sec = 172800
 
 [[steps]]
 name = "measure"
@@ -66,4 +135,6 @@ timeout_sec = 60
 [steps.verifier]
 environment_mode = "shared"
 user = "root"
+network_mode = "no-network"
 timeout_sec = 172800
+{% endif %}

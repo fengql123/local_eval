@@ -1,0 +1,22 @@
+# Configuration reference; these endpoints are illustrative, not an executed run.
+# Start two reachable source-model replicas before using this file. A recording
+# service may bind 0.0.0.0:8000 in its own container/network namespace and publish
+# it as host 8001/8002. Publishing alone does not expose a loopback-only listener.
+# Built-in verification launchers remain fixed to 127.0.0.1:8000.
+# python -m eval.bench.run C2 A-1 --mode record --servers examples/record.servers.yaml
+# --data /path/to/supplied/raw-data --concurrency 2
+servers:
+  primary:
+    model: C2
+    engine: vllm
+    context_window: 131072  # Must match the running server's max_model_len.
+    endpoint: http://127.0.0.1:8001
+  secondary:
+    model: C2
+    engine: vllm
+    context_window: 131072  # Must match the running server's max_model_len.
+    endpoint: http://127.0.0.1:8002
+# Optional routes: replace the key with a selected raw row's actual id.
+# Unrouted rows alternate between these identical replicas once per session.
+routes:
+  replace-with-selected-row-id: primary

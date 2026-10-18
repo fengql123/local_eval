@@ -6,23 +6,23 @@ import os
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pytest
 from http_server import event, headers, server
 
 from eval.bench.run import quality
 from eval.bench.serve import Server
 from eval.request_policy import request_fields
-from eval.verify.judge import paired
+from eval.verify.judge import quality_result
 from eval.verify.run import Backend, pre_run, probe
 
 
 def sample():
-    default = Path(__file__).resolve().parents[2] / "edge-harness-v2" / "local_eval_data"
-    source = Path(os.environ.get("LOCAL_EVAL_DATA", default))
+    source = Path(
+        os.environ.get("LOCAL_EVAL_DATA", Path(__file__).resolve().parents[1] / "data/dataset")
+    )
     return [
         row
-        for row in pq.read_table(source / "S" / "public-00000-of-00001.parquet").to_pylist()
-        if row["model"] == "C2"
+        for row in pq.read_table(source / "quality/questions.parquet").to_pylist()
+        if row["category"] == "math"
     ][:2]
 
 
@@ -41,9 +41,9 @@ async def reply(writer, text):
     await writer.drain()
 
 
-def test_quality_batches_all_rows_without_usage_warmup_or_timing():
+def test_quality_batches_all_rows_without_usage_warmup_or_timing(tmp_path, monkeypatch):
     selected = sample()
-    policy = request_fields("C2")
+    policy = request_fields("Qwen3.6-35B-A3B")
 
     async def scenario():
         admitted = 0
@@ -61,12 +61,30 @@ def test_quality_batches_all_rows_without_usage_warmup_or_timing():
                 if json.loads(row["requests"][0]["messages"]) == body["messages"]
             )
             await headers(writer)
+            # A queued reply may stay completely silent past one request's
+            # budget while a healthy serialized backend serves another row.
+            await asyncio.sleep(0.2 if row == selected[0] else 0.4)
             writer.write(event({"content": gold(row)}) + event(finish="stop") + b"data: [DONE]\n\n")
             await writer.drain()
 
         async with server(respond) as (endpoint, received):
             result = await quality(
-                selected, policy, server=Server(None, endpoint, health_timeout=2)
+                selected,
+                policy,
+                server=Server(None, endpoint, health_timeout=2),
+                request_timeout=0.3,
+                progress=tmp_path,
+            )
+            assert "replay_version" not in json.loads((tmp_path / "config.json").read_text())
+            assert (
+                await quality(
+                    selected,
+                    policy,
+                    server=Server(None, endpoint, health_timeout=2),
+                    request_timeout=0.3,
+                    progress=tmp_path,
+                )
+                == result
             )
         assert result["ok"] and result["accuracy"] == 1
         assert result["items"] == {row["id"]: True for row in selected}
@@ -82,7 +100,7 @@ def test_quality_batches_all_rows_without_usage_warmup_or_timing():
 
 def test_probe_batches_supplied_questions_with_complete_grade_evidence():
     selected = sample()
-    policy = request_fields("C2")
+    policy = request_fields("Qwen3.6-35B-A3B")
     answers = {row["requests"][0]["messages"]: gold(row) for row in selected}
 
     async def scenario():
@@ -124,40 +142,47 @@ def test_probe_batches_supplied_questions_with_complete_grade_evidence():
         assert sorted(map(json.dumps, received)) == sorted(map(json.dumps, expected))
         assert {record["row_id"] for record in result["records"]} == set(result["items"])
         assert all(record["ok"] and record["text"] for record in result["records"])
-        assert paired(selected, result["items"], result["items"])["mcnemar"]["p"] == 1
+        assert quality_result(selected, bound(selected, 2), result["items"])["ok"]
 
     asyncio.run(scenario())
 
 
-def test_exact_quality_threshold_requires_every_selected_item():
+def bound(rows, minimum):
+    return {
+        "id": "frozen-profile",
+        "question_ids": [row["id"] for row in rows],
+        "min_correct": minimum,
+    }
+
+
+def test_frozen_lower_bound_requires_every_selected_item_and_allows_higher_accuracy():
     selected = [{"id": f"question-{number}"} for number in range(20)]
     reference = {row["id"]: True for row in selected}
     five_losses = {key: number >= 5 for number, key in enumerate(reference)}
-    rejected = paired(selected, reference, five_losses)
+    rejected = quality_result(selected, bound(selected, 16), five_losses)
     assert not rejected["ok"]
-    assert rejected["mcnemar"] == {
+    assert rejected["bound"] == {
         "items": 20,
-        "lost": 5,
-        "won": 0,
-        "p": pytest.approx(1 / 32),
-        "ref_accuracy": 1,
+        "correct": 15,
+        "min_correct": 16,
         "accuracy": 0.75,
+        "profile_id": "frozen-profile",
     }
     four_losses = {key: number >= 4 for number, key in enumerate(reference)}
-    allowed = paired(selected, reference, four_losses)
-    assert allowed["ok"] and allowed["mcnemar"]["p"] == pytest.approx(1 / 16)
-    incomplete = paired(
-        selected, reference, {key: value for key, value in five_losses.items() if value}
+    assert quality_result(selected, bound(selected, 16), four_losses)["ok"]
+    assert quality_result(selected, bound(selected, 16), reference)["ok"]
+    incomplete = quality_result(
+        selected, bound(selected, 16), {key: value for key, value in five_losses.items() if value}
     )
-    assert not incomplete["ok"] and len(incomplete["missing"]["candidate"]) == 5
-    extra = paired(selected, reference, {**reference, "unselected": True})
-    assert not extra["ok"] and extra["unexpected"]["candidate"] == ["unselected"]
-    assert not paired([], {}, {})["ok"]
+    assert not incomplete["ok"] and len(incomplete["missing"]) == 5
+    extra = quality_result(selected, bound(selected, 16), {**reference, "unselected": True})
+    assert not extra["ok"] and extra["unexpected"] == ["unselected"]
+    assert not quality_result([], bound([], 0), {})["ok"]
 
 
 def test_invalid_candidate_is_rejected_and_invalid_reference_has_no_verdict():
     selected = sample()
-    policy = request_fields("C2")
+    policy = request_fields("Qwen3.6-35B-A3B")
 
     async def scenario():
         async def valid(_reader, writer, body):
@@ -176,17 +201,16 @@ def test_invalid_candidate_is_rejected_and_invalid_reference_has_no_verdict():
             else:
                 await reply(writer, gold(selected[1]))
 
-        async with server(valid) as (good_url, _), server(incomplete) as (bad_url, _):
-            good = Backend("valid", policy, lambda _stage: Server(None, good_url, health_timeout=2))
+        async with server(incomplete) as (bad_url, _):
             bad = Backend("invalid", policy, lambda _stage: Server(None, bad_url, health_timeout=2))
-            failed_candidate = await pre_run(selected, good, bad)
+            failed_candidate = await pre_run(selected, bound(selected, 2), bad)
             assert failed_candidate["ok"] is False and failed_candidate["stage"] == "quality"
             failed = failed_candidate["quality"]["candidate"]
             assert not failed["ok"] and failed["records"]
             invalid = next(record for record in failed["records"] if not record["ok"])
             assert "missing completion finish marker" in invalid["errors"]
-            failed_reference = await pre_run(selected, bad, good)
-            assert failed_reference["ok"] is None and failed_reference["stage"] == "quality"
-            assert "candidate" not in failed_reference["quality"]
+            failed_reference = await probe(bad, selected)
+            assert failed_reference["ok"] is False and failed_reference["stage"] == "quality"
+            assert failed_reference["errors"]
 
     asyncio.run(scenario())

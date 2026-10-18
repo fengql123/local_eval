@@ -1,0 +1,145 @@
+diff --git a/python/freetoken/models/weight.py b/python/freetoken/models/weight.py
+index e3382b1..bd6f864 100644
+--- a/python/freetoken/models/weight.py
++++ b/python/freetoken/models/weight.py
+@@ -18,7 +18,6 @@ import os
+ import queue
+ import struct
+ import threading
+-from concurrent.futures import ThreadPoolExecutor
+ from typing import Callable, Iterator, Tuple
+ 
+ import torch
+@@ -37,31 +36,13 @@ _ODIRECT_BLK = 4096
+ 
+ 
+ def _read_shard_odirect_parallel(path: str, workers: int, chunk: int) -> mmap.mmap:
+-    """Read a whole shard into a page-aligned mmap via CHUNKED multi-threaded O_DIRECT.
+-    Multi-threading one fd scales even for single-shard checkpoints (measured ~7x at 8
+-    threads): the kernel issues the parallel preads at high queue depth. DMA bypasses the
+-    page cache, so there's nothing to drop afterwards."""
++    """Read a whole shard into a page-aligned mmap via the common O_DIRECT reader."""
++    from freetoken.moe.host_banks import read_file_into
++
+     size = os.path.getsize(path)
+     asize = ((size + _ODIRECT_BLK - 1) // _ODIRECT_BLK) * _ODIRECT_BLK
+     buf = mmap.mmap(-1, asize)
+-    mv = memoryview(buf)
+-    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+-    offs = list(range(0, size, chunk))
+-
+-    def rd(o):
+-        want = min(chunk, asize - o)
+-        want = min(want, ((size - o + _ODIRECT_BLK - 1) // _ODIRECT_BLK) * _ODIRECT_BLK)
+-        os.preadv(fd, [mv[o:o + want]], o)
+-
+-    try:
+-        if len(offs) <= 1:
+-            for o in offs:
+-                rd(o)
+-        else:
+-            with ThreadPoolExecutor(workers) as ex:
+-                list(ex.map(rd, offs))
+-    finally:
+-        os.close(fd)
++    read_file_into(buf, path, workers=workers, chunk=chunk, drop_cache=False)
+     return buf
+ 
+ 
+diff --git a/python/freetoken/moe/host_banks.py b/python/freetoken/moe/host_banks.py
+index 91e2648..def8c56 100644
+--- a/python/freetoken/moe/host_banks.py
++++ b/python/freetoken/moe/host_banks.py
+@@ -9,8 +9,8 @@ contiguous cache) paths both rely on:
+   faults+zero-fills every page (~137 GiB -> ~47 s for DSV4) and that zero-fill is then
+   immediately overwritten by the read. So pin-after-fill removes a whole redundant pass.
+ * **chunked multi-threaded O_DIRECT** -- DMA straight from disk into the (page-aligned)
+-  bank, bypassing the page cache, with many concurrent ``preadv`` on one fd (scales to the
+-  device's queue-depth ceiling even for a single file).
++  bank, bypassing the page cache. Each worker reads a contiguous span through its own
++  file handle so network filesystems can retain their sequential prefetch state.
+ 
+ The mmaps are held for the process lifetime (the banks live as long as the offload cache).
+ """
+@@ -384,32 +384,8 @@ def read_file_into(buf: memoryview | mmap.mmap, path: str, *, workers: int = 8,
+     """Chunked multi-threaded O_DIRECT read of the whole file ``path`` into ``buf``
+     (page-aligned). Returns the file size. The buffer must be >= the rounded-up file size."""
+     size = os.path.getsize(path)
+-    if drop_cache:
+-        try:
+-            fd0 = os.open(path, os.O_RDONLY)
+-            os.posix_fadvise(fd0, 0, 0, os.POSIX_FADV_DONTNEED)
+-            os.close(fd0)
+-        except OSError:
+-            pass
+-    mv = buf if isinstance(buf, memoryview) else memoryview(buf)
+-    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+-    offs = list(range(0, size, chunk))
+-
+-    def rd(o):
+-        want = min(chunk, len(mv) - o)
+-        want = min(want, ((size - o + _BLK - 1) // _BLK) * _BLK)
+-        os.preadv(fd, [mv[o:o + want]], o)
+-
+-    try:
+-        if len(offs) <= 1:
+-            for o in offs:
+-                rd(o)
+-        else:
+-            with ThreadPoolExecutor(workers) as ex:
+-                list(ex.map(rd, offs))
+-    finally:
+-        os.close(fd)
+-    return size
++    return read_range_into(buf, path, file_offset=0, nbytes=size,
++                           workers=workers, chunk=chunk, drop_cache=drop_cache)
+ 
+ 
+ def _preadv_all(fd: int, dst: memoryview, offset: int, need: int) -> None:
+@@ -442,10 +418,9 @@ def read_range_into(buf: memoryview | mmap.mmap, path: str, *, file_offset: int,
+             os.close(fd0)
+         except OSError:
+             pass
+-    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+     scratch = threading.local()
+ 
+-    def rd(i: int) -> None:
++    def rd(fd: int, i: int) -> None:
+         n = min(chunk, nbytes - i)
+         src, dst = file_offset + i, dest_offset + i
+         if src % _BLK == 0 and (base + dst) % _BLK == 0 and n % _BLK == 0:
+@@ -460,16 +435,24 @@ def read_range_into(buf: memoryview | mmap.mmap, path: str, *, file_offset: int,
+         _preadv_all(fd, bmv[:span], src - head, head + n)
+         mv[dst:dst + n] = bmv[head:head + n]
+ 
+-    try:
+-        offs = list(range(0, nbytes, chunk))
+-        if len(offs) <= 1:
+-            for o in offs:
+-                rd(o)
+-        else:
+-            with ThreadPoolExecutor(workers) as ex:
+-                list(ex.map(rd, offs))
+-    finally:
+-        os.close(fd)
++    offs = range(0, nbytes, chunk)
++    span_chunks = max(1, (len(offs) + workers - 1) // workers)
++
++    def read_span(first: int) -> None:
++        fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
++        try:
++            for index in range(first, min(first + span_chunks, len(offs))):
++                rd(fd, offs[index])
++        finally:
++            os.close(fd)
++
++    spans = range(0, len(offs), span_chunks)
++    if len(spans) <= 1:
++        for first in spans:
++            read_span(first)
++    else:
++        with ThreadPoolExecutor(workers) as ex:
++            list(ex.map(read_span, spans))
+     return nbytes
+ 
+ 

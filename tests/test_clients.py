@@ -36,6 +36,8 @@ def test_recorded_messages_tools_and_policy_survive_fragmented_sse():
             nonlocal role_sent
             await headers(writer)
             writer.write(b": keepalive\n\n" + event({"role": "assistant"}))
+            # A tool-call ID describes the envelope, not generated output.
+            writer.write(event({"tool_calls": [{"index": 0, "id": "call_1"}]}))
             await writer.drain()
             role_sent = perf_counter()
             await asyncio.sleep(0.02)
@@ -55,7 +57,6 @@ def test_recorded_messages_tools_and_policy_survive_fragmented_sse():
                         "tool_calls": [
                             {
                                 "index": 0,
-                                "id": "call_1",
                                 "type": "function",
                                 "function": {"name": "read_file", "arguments": '{"path":'},
                             }
@@ -78,7 +79,7 @@ def test_recorded_messages_tools_and_policy_survive_fragmented_sse():
 
         request = recorded()
         async with server(respond) as (endpoint, requests):
-            async with ChatClient(endpoint, request_fields("C2", "ollama")) as client:
+            async with ChatClient(endpoint, request_fields("Qwen3.6-35B-A3B", "ollama")) as client:
                 result = await client.request(request, "A-N")
         assert result["ok"], result["errors"]
         assert requests[0]["messages"] == json.loads(request["messages"])
@@ -99,6 +100,8 @@ def test_recorded_messages_tools_and_policy_survive_fragmented_sse():
         assert (
             result["t_send"] < role_sent < result["t_first"] <= result["t_last"] < result["t_end"]
         )
+        assert result["output_events"] == 3
+        assert result["stream_gap_max"] >= 0
 
     asyncio.run(run())
 
@@ -114,6 +117,8 @@ def test_finish_boundary_covers_invisible_forced_tokens_and_s_allowance():
             await writer.drain()
             visible_sent.append(perf_counter())
             await asyncio.sleep(0.04)
+            writer.write(event({"content": "y"}))
+            await writer.drain()
             writer.write(event(finish="length"))
             await writer.drain()
             finish_sent.append(perf_counter())
@@ -123,15 +128,16 @@ def test_finish_boundary_covers_invisible_forced_tokens_and_s_allowance():
 
         async with server(respond) as (endpoint, requests):
             async with ChatClient(
-                endpoint, request_fields("C2"), served_model="candidate"
+                endpoint, request_fields("Qwen3.6-35B-A3B"), served_model="candidate"
             ) as client:
                 forced = await client.request(recorded(), "A-MA")
                 single = await client.request(recorded(32768), "S-1")
         assert forced["ok"] and single["ok"]
-        assert forced["text"] == "x" and forced["output_tokens"] == 8
+        assert forced["text"] == "xy" and forced["output_tokens"] == 8
         assert forced["t_last"] >= finish_sent[0] > visible_sent[0]
         assert forced["t_last"] - forced["t_first"] >= 0.03
         assert forced["t_end"] - forced["t_last"] >= 0.015
+        assert forced["output_events"] == 2 and forced["stream_gap_max"] >= 0.03
         assert requests[0]["ignore_eos"] is True
         assert "ignore_eos" not in requests[1]
         assert requests[1]["max_tokens"] == 32768
@@ -145,10 +151,13 @@ def test_finish_boundary_covers_invisible_forced_tokens_and_s_allowance():
             await writer.drain()
 
         async with server(answer_without_usage) as (endpoint, _):
-            async with ChatClient(endpoint, request_fields("C2"), mode="quality") as client:
+            async with ChatClient(
+                endpoint, request_fields("Qwen3.6-35B-A3B"), mode="quality"
+            ) as client:
                 quality = await client.request(recorded(), "S-1")
         assert quality["ok"] and quality["text"] == "Final answer: B."
         assert "output_tokens" not in quality and "cached_tokens" not in quality
+        assert "output_events" not in quality and "stream_gap_max" not in quality
         assert not any(key.startswith("t_") for key in quality)
 
     asyncio.run(run())
@@ -163,6 +172,7 @@ def test_incomplete_error_and_usage_only_streams_have_no_valid_score():
             (b'data: {"error":{"message":"engine failed"}}\n\ndata: [DONE]\n\n', "server error"),
             (
                 event({"role": "assistant"})
+                + event({"tool_calls": [{"index": 0, "id": "call_1", "type": "function"}]})
                 + event(finish="length")
                 + event(count=8)
                 + b"data: [DONE]\n\n",
@@ -177,14 +187,16 @@ def test_incomplete_error_and_usage_only_streams_have_no_valid_score():
                 await writer.drain()
 
             async with server(respond) as (endpoint, _):
-                async with ChatClient(endpoint, request_fields("C2")) as client:
+                async with ChatClient(endpoint, request_fields("Qwen3.6-35B-A3B")) as client:
                     result = await client.request(recorded(), "A-N")
             assert not result["ok"]
             assert any(message in error for error in result["errors"])
 
             if message in ("missing [DONE]", "server error"):
                 async with server(respond) as (endpoint, _):
-                    async with ChatClient(endpoint, request_fields("C2"), mode="quality") as client:
+                    async with ChatClient(
+                        endpoint, request_fields("Qwen3.6-35B-A3B"), mode="quality"
+                    ) as client:
                         quality = await client.request(recorded(), "S-1")
                 assert not quality["ok"]
                 assert any(message in error for error in quality["errors"])
@@ -206,13 +218,18 @@ def test_cancellation_and_http_failure_release_the_connection():
             disconnected.set()
 
         async with server(respond) as (endpoint, _):
-            async with ChatClient(endpoint, request_fields("C2")) as client:
+            async with ChatClient(endpoint, request_fields("Qwen3.6-35B-A3B")) as client:
                 task = asyncio.create_task(client.request(recorded(), "A-N"))
                 await asyncio.wait_for(started.wait(), 2)
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
                 await asyncio.wait_for(disconnected.wait(), 2)
+            async with ChatClient(
+                endpoint, request_fields("Qwen3.6-35B-A3B"), timeout=0.05, total_timeout=0.3
+            ) as client:
+                with pytest.raises(TimeoutError):
+                    await client.request(recorded(), "A-N")
 
         heartbeat_disconnected = asyncio.Event()
         heartbeats = []
@@ -228,7 +245,9 @@ def test_cancellation_and_http_failure_release_the_connection():
             heartbeat_disconnected.set()
 
         async with server(heartbeat) as (endpoint, _):
-            async with ChatClient(endpoint, request_fields("C2"), timeout=0.05) as client:
+            async with ChatClient(
+                endpoint, request_fields("Qwen3.6-35B-A3B"), timeout=0.05, total_timeout=0.1
+            ) as client:
                 with pytest.raises(TimeoutError):
                     await client.request(recorded(), "A-N")
                 await asyncio.wait_for(heartbeat_disconnected.wait(), 2)
@@ -241,7 +260,7 @@ def test_cancellation_and_http_failure_release_the_connection():
             await writer.drain()
 
         async with server(failed) as (endpoint, _):
-            async with ChatClient(endpoint, request_fields("C2")) as client:
+            async with ChatClient(endpoint, request_fields("Qwen3.6-35B-A3B")) as client:
                 with pytest.raises(httpx.HTTPStatusError, match="503"):
                     await client.request(recorded(), "A-N")
 

@@ -1,0 +1,10 @@
+{
+  "providers": {
+    "record": {
+      "baseUrl": {{ (url + '/v1') | tojson }},
+      "api": "openai-completions",
+      "apiKey": "local",
+      "models": [{"id": "served", "contextWindow": {{ context_window }}, "maxTokens": {{ allowance }}}]
+    }
+  }
+}

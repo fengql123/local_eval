@@ -1,4 +1,4 @@
-"""Submission rules, native reviewer inputs and paired quality decisions.
+"""Submission rules, native reviewer inputs and stored quality decisions.
 
 Execution and procedure order belong to verify.run; image sources define the
 reviewer's access. Answer grading belongs to the shared accuracy functions.
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import tomllib
-from math import comb
 from pathlib import Path
 
 from rewardkit.models import JudgeConfig
@@ -16,46 +15,62 @@ from rewardkit.models import JudgeConfig
 from ..config import AgentConfig
 from ..request_policy import request_fields
 
-ALPHA = 0.05
-
 
 def static_check(submission: Path) -> dict:
-    """Require install/launch; an optional conversion script stays in the submission."""
-    scripts = ["install.sh", "launch.sh"]
-    if (submission / "convert_weight.sh").exists() or (
-        submission / "convert_weight.sh"
-    ).is_symlink():
-        scripts.append("convert_weight.sh")
+    """Check the reproducible submission contract, not implementation semantics."""
+    scripts = ["install.sh"]
     missing = [name for name in scripts if not (submission / name).is_file()]
-    escaped = [
+    reserved = [
         name
-        for name in scripts
-        if (submission / name).is_symlink()
-        and not (submission / name).resolve().is_relative_to(submission.resolve())
+        for name in ("runtime", "output", ".harbor")
+        if submission != Path("/workspace") and (submission / name).exists()
     ]
-    return {"ok": not (missing or escaped), "missing": missing, "external_scripts": escaped}
+
+    def project():
+        for folder, dirs, names in submission.walk():
+            if folder == submission and submission == Path("/workspace"):
+                dirs[:] = [name for name in dirs if name not in (".harbor", "runtime", "output")]
+            yield from (folder / name for name in dirs + names)
+
+    escaped = [
+        str(path.relative_to(submission))
+        for path in project()
+        if path.is_symlink()
+        and (
+            not path.resolve().is_relative_to(submission.resolve())
+            or path.resolve().is_relative_to(submission.resolve() / ".harbor")
+        )
+    ]
+    return {
+        "ok": not (missing or escaped or reserved),
+        "missing": missing,
+        "external_paths": escaped,
+        "reserved_paths": reserved,
+    }
 
 
 def write_review(task: dict, submission: Path, rubric: Path) -> None:
     """Write Rewardkit's native configuration and task-specific inspection prompt."""
     agent = AgentConfig(**task["evaluation"]["agent"])
     policy = request_fields(task["model"])
+    slo = task.get("type") == "SLO"
     prompt = (
         Path(__file__)
         .with_name("prompt.txt")
         .read_text()
         .format(
             model=task["model"],
+            target=task["target"]["source"],
             workload=task["workload"],
             submission=submission.resolve(),
-            weights=(submission.parent / "weights").resolve(),
             request_policy=json.dumps(policy.fixed(task["workload"])),
+            comparison="No baseline serves this model here; fixed SLO tiers score the candidate."
+            if slo
+            else "The candidate uses its fixed model checkpoint; the reference may use another format.",
+            timing="" if slo else "; the selected reference has not yet been timed",
             criteria="{criteria}",
         )
     )
-    unknown = set(agent.kwargs) - {"version", "mcp_servers"}
-    if unknown:
-        raise ValueError(f"unsupported Rewardkit agent kwargs: {', '.join(sorted(unknown))}")
     options = JudgeConfig(
         judge=agent.name,
         model=agent.model,
@@ -94,8 +109,12 @@ def rules_result(rewards: dict, details: dict) -> dict:
         len(decisions) == len(expected)
         and {entry.get("name") for entry in decisions} == expected
         and all(entry.get("value") in (0, 1) and not entry.get("error") for entry in decisions)
-        and all(entry.get("reasoning") for entry in decisions if entry["value"] == 0)
+        and all(
+            isinstance(entry.get("reasoning"), str) and entry["reasoning"].strip()
+            for entry in decisions
+        )
         and rewards.get("reward") in (0, 1)
+        and rewards["reward"] == int(all(entry["value"] == 1 for entry in decisions))
     )
     return {
         **detail,
@@ -104,36 +123,36 @@ def rules_result(rewards: dict, details: dict) -> dict:
     }
 
 
-def paired(rows: list[dict], reference: dict[str, bool], candidate: dict[str, bool]) -> dict:
-    """Exact one-sided McNemar test, using every expected quality row."""
+def quality_result(rows: list[dict], profile: dict, candidate: dict[str, bool]) -> dict:
+    """Apply the independently prepared lower bound to all selected questions."""
     expected = {row["id"] for row in rows}
-    missing = {
-        "reference": sorted(expected - reference.keys()),
-        "candidate": sorted(expected - candidate.keys()),
-    }
-    unexpected = {
-        "reference": sorted(reference.keys() - expected),
-        "candidate": sorted(candidate.keys() - expected),
-    }
-    if not expected or any(missing.values()) or any(unexpected.values()):
+    missing = sorted(expected - candidate.keys())
+    unexpected = sorted(candidate.keys() - expected)
+    if not expected or missing or unexpected or set(profile["question_ids"]) != expected:
         return {
             "ok": False,
             "reason": "quality answers must cover exactly the selected rows",
             "missing": missing,
             "unexpected": unexpected,
         }
-    lost = sum(reference[key] and not candidate[key] for key in expected)
-    won = sum(candidate[key] and not reference[key] for key in expected)
-    discordant = lost + won
-    probability = sum(comb(discordant, k) for k in range(lost, discordant + 1)) / 2**discordant
-    return {
-        "ok": probability >= ALPHA,
-        "mcnemar": {
+    correct = sum(candidate.values())
+    result = {
+        "ok": correct >= profile["min_correct"],
+        "bound": {
             "items": len(expected),
-            "lost": lost,
-            "won": won,
-            "p": probability,
-            "ref_accuracy": sum(reference.values()) / len(expected),
-            "accuracy": sum(candidate.values()) / len(expected),
+            "correct": correct,
+            "min_correct": profile["min_correct"],
+            "accuracy": correct / len(expected),
+            "profile_id": profile["id"],
         },
     }
+    categories = sorted({row["category"] for row in rows if "category" in row})
+    if categories:
+        result["categories"] = {
+            category: {
+                "items": sum(row["category"] == category for row in rows),
+                "correct": sum(candidate[row["id"]] for row in rows if row["category"] == category),
+            }
+            for category in categories
+        }
+    return result

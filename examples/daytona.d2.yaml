@@ -1,0 +1,67 @@
+dataset: /home/qilongf/local_eval/data/dataset
+concurrency: 35
+max_retries: 10
+environment:
+  provider: daytona
+  device_category: nvidia-cuda-x86
+  cpus: 8
+  memory_mb: 131072
+  storage_mb: 524288
+  kwargs:
+    gpus: 1
+    gpu_types:
+    - RTX-5090
+    spot: true
+    auto_stop_interval_mins: 0
+    auto_delete_interval_mins: 0
+    cpu_prefixes:  # any Genoa (EPYC 9004, Zen 4)
+    - AMD EPYC 9124
+    - AMD EPYC 9174F
+    - AMD EPYC 9184X
+    - AMD EPYC 9224
+    - AMD EPYC 9254
+    - AMD EPYC 9274F
+    - AMD EPYC 9334
+    - AMD EPYC 9354
+    - AMD EPYC 9354P
+    - AMD EPYC 9374F
+    - AMD EPYC 9384X
+    - AMD EPYC 9454
+    - AMD EPYC 9454P
+    - AMD EPYC 9474F
+    - AMD EPYC 9534
+    - AMD EPYC 9554
+    - AMD EPYC 9554P
+    - AMD EPYC 9634
+    - AMD EPYC 9654
+    - AMD EPYC 9654P
+    - AMD EPYC 9684X
+    auto_snapshot: true
+tasks:
+  models: all
+  workloads: all
+agent:
+  name: codex
+  model: gpt-6.1-sol
+  kwargs:
+    reasoning_effort: xhigh
+  budget: 24h
+search:
+  agent:
+    name: codex
+    model: gpt-6.1-sol
+    kwargs:
+      reasoning_effort: medium
+    budget: 24h
+evaluation:
+  concurrency:
+    S-N: 32
+    A-N: 8
+  agent:
+    name: codex
+    model: gpt-6.1-sol
+    kwargs:
+      reasoning_effort: medium
+    budget: 24h
+  quality_timeout: 5h
+out: ../runs

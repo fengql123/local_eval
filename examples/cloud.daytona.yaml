@@ -1,0 +1,48 @@
+# Dataset views load on the coordinator and upload into each phase sandbox.
+# An absolute local HF release and an HF repository use the same configurations.
+dataset: owner/benchmark
+concurrency: 2
+max_retries: 3
+
+environment:
+  provider: daytona
+  import_path: null
+  device_category: nvidia-cuda-x86
+  cpus: 8
+  memory_mb: 131072
+  storage_mb: 524288
+  kwargs:
+    gpus: 1
+    gpu_types: [RTX-4090]
+    spot: true
+    auto_stop_interval_mins: 0
+    auto_delete_interval_mins: 0
+
+tasks:
+  models: [Qwen3.8-Flash-Next]
+  workloads: [A-1]
+
+agent:
+  name: claude-code
+  model: claude-opus-5-5
+  kwargs: {reasoning_effort: xhigh}
+  budget: 24h
+
+search:
+  agent:
+    name: claude-code
+    model: claude-opus-5-5
+    kwargs: {reasoning_effort: xhigh}
+    budget: 24h
+
+evaluation:
+  concurrency: {S-N: 32, A-N: 8}
+  install_timeout: 4h
+  health_timeout: 1h
+  agent:
+    name: claude-code
+    model: claude-opus-5-5
+    budget: 24h
+    kwargs: {reasoning_effort: xhigh}
+
+out: runs

@@ -21,7 +21,7 @@ def inspect(config_path: str) -> dict:
     task = selected[0]
     # This example inspects the NVIDIA catalog entry; it does not claim that
     # this host has a GPU or that setup has prepared a checkpoint.
-    category = "nvidia-cuda-x86"
+    category = config.environment.device_category
     engine = "freetoken"
     asset = mapping(category, task.model, engine)
     policy = request_fields(task.model, engine)
@@ -32,6 +32,10 @@ def inspect(config_path: str) -> dict:
         "coding_agent": asdict(config.agent) if config.agent is not None else None,
         "search": asdict(config.search),
         "dockerfile": f"images/{category}/Dockerfile",
+        "phase_dockerfiles": [
+            f"images/{category}/{phase}.Dockerfile"
+            for phase in ("search", "coding", "verification")
+        ],
         "installer": f"images/{category}/baselines/{engine}/install.sh",
         "asset": asdict(asset),
         "request_fields": policy.fields(task.workload, OUTPUT_ALLOWANCE),

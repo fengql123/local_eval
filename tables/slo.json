@@ -1,0 +1,84 @@
+{
+  "attainment": 0.9,
+  "single_stream": {
+    "workloads": [
+      "S-1",
+      "A-1",
+      "A-MA"
+    ],
+    "tiers": [
+      {
+        "id": "T1",
+        "name": "Basic",
+        "ttft_s": 10,
+        "throughput": 5
+      },
+      {
+        "id": "T2",
+        "name": "Steady",
+        "ttft_s": 2,
+        "throughput": 10
+      },
+      {
+        "id": "T3",
+        "name": "Responsive",
+        "ttft_s": 1,
+        "throughput": 25
+      },
+      {
+        "id": "T4",
+        "name": "Fast",
+        "ttft_s": 0.5,
+        "throughput": 50
+      }
+    ]
+  },
+  "S-N": {
+    "tiers": [
+      {
+        "id": "T1",
+        "name": "Basic",
+        "throughput": 10
+      },
+      {
+        "id": "T2",
+        "name": "Steady",
+        "throughput": 50
+      },
+      {
+        "id": "T3",
+        "name": "Responsive",
+        "throughput": 200
+      },
+      {
+        "id": "T4",
+        "name": "Fast",
+        "throughput": 1000
+      }
+    ]
+  },
+  "A-N": {
+    "tiers": [
+      {
+        "id": "T1",
+        "name": "Basic",
+        "throughput": 10
+      },
+      {
+        "id": "T2",
+        "name": "Steady",
+        "throughput": 40
+      },
+      {
+        "id": "T3",
+        "name": "Responsive",
+        "throughput": 160
+      },
+      {
+        "id": "T4",
+        "name": "Fast",
+        "throughput": 640
+      }
+    ]
+  }
+}

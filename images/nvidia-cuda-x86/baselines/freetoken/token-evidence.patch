@@ -1,0 +1,128 @@
+diff --git a/python/freetoken/message/frontend.py b/python/freetoken/message/frontend.py
+index 2472556..9591c6c 100644
+--- a/python/freetoken/message/frontend.py
++++ b/python/freetoken/message/frontend.py
+@@ -56,6 +56,9 @@ class UserReply(BaseFrontendMsg):
+     finish_reason: str | None = None
+     # The stop string that ended generation (Anthropic reports it as stop_reason='stop_sequence').
+     matched_stop: str | None = None
++    # Accepted engine output, retained before text/reasoning/tool parsing.
++    token_ids: List[int] | None = None
++    raw_text: str = ""
+ 
+ 
+ @dataclass
+diff --git a/python/freetoken/server/generation.py b/python/freetoken/server/generation.py
+index ac988ed..75112ea 100644
+--- a/python/freetoken/server/generation.py
++++ b/python/freetoken/server/generation.py
+@@ -66,6 +66,12 @@ class GenerationError(ValueError):
+ # so generation/parsing logic lives in exactly one place and no adapter has to
+ # re-parse a serialized OpenAI stream.
+ # --------------------------------------------------------------------------- #
++@dataclass
++class RawDelta:
++    token_ids: list[int]
++    text: str = ""
++
++
+ @dataclass
+ class ReasoningDelta:
+     text: str
+@@ -117,7 +123,7 @@ class GenDone:
+     cached_tokens: int = 0
+ 
+ 
+-GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
++GenEvent = RawDelta | ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
+ 
+ 
+ @dataclass
+@@ -698,6 +704,8 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
+         prompt_tokens += ack.prompt_tokens_delta
+         completion_tokens += ack.completion_tokens_delta
+         cached_tokens += ack.cached_tokens
++        if getattr(ack, "token_ids", None):
++            yield RawDelta(ack.token_ids, ack.raw_text)
+         content_delta = ack.incremental_output
+         if reasoning_parser is not None and content_delta:
+             reasoning_delta, content_delta = reasoning_parser.parse_stream_chunk(content_delta)
+diff --git a/python/freetoken/server/openai_api.py b/python/freetoken/server/openai_api.py
+index dc2f73a..489f3fe 100644
+--- a/python/freetoken/server/openai_api.py
++++ b/python/freetoken/server/openai_api.py
+@@ -28,6 +28,7 @@ from .generation import (
+     GenDone,
+     GenerationError,
+     GenSpec,
++    RawDelta,
+     ReasoningDelta,
+     ToolCallArgsDelta,
+     ToolCallsDelta,
+@@ -272,7 +273,9 @@ async def stream_chat_completion_chunks(
+                 {"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}}
+             )
+             break
+-        if isinstance(ev, ReasoningDelta):
++        if isinstance(ev, RawDelta):
++            yield _sse(_chat_chunk(req, uid, [{"delta": {"token_ids": ev.token_ids, "raw_text": ev.text}, "index": 0, "finish_reason": None}]))
++        elif isinstance(ev, ReasoningDelta):
+             yield _sse(
+                 _chat_chunk(
+                     req,
+diff --git a/python/freetoken/tokenizer/server.py b/python/freetoken/tokenizer/server.py
+index d3365bf..62847d4 100644
+--- a/python/freetoken/tokenizer/server.py
++++ b/python/freetoken/tokenizer/server.py
+@@ -157,6 +157,7 @@ def tokenize_worker(
+     if ack_queue is not None:
+         ack_queue.put(f"Tokenize server {tokenizer_id} is ready")
+ 
++    accepted_ids: dict[int, list[int]] = {}
+     try:
+         while True:
+             pending_msg = _unwrap_msg(recv_listener.get())
+@@ -210,14 +211,21 @@ def tokenize_worker(
+             sampled_replies: List[UserReply] = []
+             if len(detokenize_msg) > 0:
+                 replies = detokenize_manager.detokenize(detokenize_msg)
+-                sampled_replies = [
+-                    UserReply(
++                for msg, reply in zip(detokenize_msg, replies, strict=True):
++                    ids = accepted_ids.setdefault(msg.uid, [])
++                    ids.append(msg.next_token)
++                    raw_text = tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False) if msg.finished else ""
++                    if msg.finished:
++                        del accepted_ids[msg.uid]
++                    sampled_replies.append(UserReply(
+                         uid=msg.uid,
+                         incremental_output=reply,
+                         finished=msg.finished,
+                         finish_reason=msg.finish_reason,
+                         matched_stop=msg.matched_stop,
+                         completion_tokens_delta=1,
++                        token_ids=[msg.next_token],
++                        raw_text=raw_text,
+                         kv_used_pages=msg.kv_used_pages,
+                         kv_total_pages=msg.kv_total_pages,
+                         mamba_used_slots=msg.mamba_used_slots,
+@@ -225,16 +233,16 @@ def tokenize_worker(
+                         swa_used_tokens=msg.swa_used_tokens,
+                         swa_total_tokens=msg.swa_total_tokens,
+                         gpu_mem_bytes=msg.gpu_mem_bytes,
+-                    )
+-                    for msg, reply in zip(detokenize_msg, replies, strict=True)
+-                ]
++                    ))
+ 
+             # An error reply and a client abort are both terminal for their uid, and neither
+             # produces the finished DetokenizeMsg that would release the decode state.
+             for msg in error_reply_msg:
+                 detokenize_manager.discard(msg.uid)
++                accepted_ids.pop(msg.uid, None)
+             for msg in abort_msg:
+                 detokenize_manager.discard(msg.uid)
++                accepted_ids.pop(msg.uid, None)
+ 
+             _send_generation_replies(
+                 send_frontend,

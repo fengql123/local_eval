@@ -1,19 +1,24 @@
 schema_version = "1.4"
-artifacts = {{ (["/root/eval/reference"] if phase == "search" else ["/workspace/submission"]) | tojson }}
+artifacts = {{ (["/var/lib/local-eval/reference"] if phase == "search" else ["/var/lib/local-eval/submission"]) | tojson }}
 
 [task]
 name = {{ ("local-eval-" + phase + "/" + task.task_id) | tojson }}
 description = {{ (phase | capitalize + " for " + task.model + ": " + task.workload) | tojson }}
 
 [environment]
-{% if phase == "coding" %}
-docker_image = {{ image.tag | tojson }}
-{% endif %}
 build_timeout_sec = {{ config.evaluation.install_timeout_seconds }}
-cpus = {{ machine.cpu_cores }}
-memory_mb = {{ machine.memory_bytes // 1048576 }}
-gpus = {{ machine.gpus | length }}
-workdir = {{ ("/home/search" if phase == "search" else "/workspace") | tojson }}
+cpus = {{ config.environment.cpus }}
+memory_mb = {{ config.environment.memory_mb }}
+{% if config.environment.provider != "docker" %}
+storage_mb = {{ config.environment.storage_mb }}
+{% if "gpus" in config.environment.kwargs %}
+gpus = {{ config.environment.kwargs.gpus }}
+{% endif %}
+{% if "gpu_types" in config.environment.kwargs %}
+gpu_types = {{ config.environment.kwargs.gpu_types | tojson }}
+{% endif %}
+{% endif %}
+workdir = "/workspace"
 
 [environment.healthcheck]
 command = "test -f /run/eval-ready"
@@ -28,6 +33,7 @@ timeout_sec = {{ config.search.agent.budget_seconds if phase == "search" else (c
 
 [verifier]
 environment_mode = "shared"
+# Trusted handoff checks have no agent execution or submitted installation.
 user = "root"
 timeout_sec = 600
 
@@ -35,7 +41,7 @@ timeout_sec = 600
 {% if phase == "coding" %}
 command = "/opt/eval/.venv/bin/python -I -m eval.verify.run --collect-submission"
 {% else %}
-command = "/opt/eval/.venv/bin/python -I -m eval.search.run --task /root/eval/task.json --stage collect"
+command = "/opt/eval/.venv/bin/python -I -m eval.search.run --task /var/lib/local-eval/task.json --stage collect"
 {% endif %}
 user = "root"
 timeout_sec = 60

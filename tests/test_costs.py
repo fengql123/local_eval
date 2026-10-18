@@ -1,6 +1,7 @@
 """Two common cost cases and two edge cases using the Phase 1 collector."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -56,7 +57,7 @@ def test_explicit_price_estimate_survives_ledger_round_trip(tmp_path):
     assert summarize(read_ledger(ledger))["total_tokens"] == 110
 
 
-def test_duplicate_collection_is_deduplicated_but_retry_is_retained():
+def test_duplicate_collection_is_deduplicated_but_retry_is_retained(tmp_path):
     first = result()
     first["agent_result"]["cost_usd"] = 0.5
     retry = result()
@@ -69,6 +70,10 @@ def test_duplicate_collection_is_deduplicated_but_retry_is_retained():
     assert report["attempts"] == 2
     assert report["total_tokens"] == 220
     assert report["cost_usd"] == 1.25
+    ledger = tmp_path / "costs.json"
+    update_ledger(ledger, [replace(attempt, attempt_id="interrupted:job/trial")])
+    final = update_ledger(ledger, attempts)
+    assert len(final) == 2 and summarize(final)["cost_usd"] == 1.25
 
 
 def test_finalized_attempt_id_cannot_be_reused_with_different_evidence():
@@ -77,3 +82,30 @@ def test_finalized_attempt_id_cannot_be_reused_with_different_evidence():
     evidence["agent_result"]["n_output_tokens"] = 11
     with pytest.raises(ValueError, match="conflicting immutable evidence"):
         merge_attempts([attempt], [from_harbor_result(evidence)])
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"total_cost_usd": 2.5, "type": "result"}\n', 2.5),
+        ('{"type":"result","total_cost_usd":0}\n', 0),
+        ('{"type":"assistant"}\n{"type":"result","total_cost_usd":9', None),
+        (None, None),
+    ],
+    ids=("reported-cost", "explicit-zero", "interrupted-stream", "missing-stream"),
+)
+def test_claude_native_cost_does_not_invent_zero(tmp_path, text, expected):
+    evidence = result()
+    evidence["agent_info"]["name"] = "claude-code"
+    evidence["agent_result"]["cost_usd"] = 0
+    original = from_harbor_result(evidence)
+    (tmp_path / "result.json").write_text(json.dumps(evidence))
+    (tmp_path / "agent").mkdir()
+    stream = tmp_path / "agent/claude-code.txt"
+    if text is not None:
+        stream.write_text(text)
+    attempt = collect_trial(tmp_path)
+    assert attempt.usage.cost_usd == expected
+    assert attempt.usage.cost_kind == ("reported" if expected is not None else "unknown")
+    assert attempt.usage.total_tokens == original.usage.total_tokens
+    assert original.usage.cost_usd == 0  # Native evidence remains unchanged.

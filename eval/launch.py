@@ -1,8 +1,7 @@
-"""The launch contract; supplied backend scripts implement this interface."""
+"""Fixed candidate entrypoint and trusted baseline script inputs."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,12 +13,10 @@ FIXED_ENV = frozenset({"CHECKPOINT", "PORT", "BASH_ENV", "ENV"})
 
 @dataclass(frozen=True)
 class Launch:
-    """Run a completed script, or fill its reserved CHECKPOINT input.
+    """Execute a script with explicit fixed inputs and adjustable parameters.
 
-    A script using $CHECKPOINT without assigning its own value is a template.
-    Complete scripts own their weights and optimized defaults.
-    Trusted callers can extend the protected option/env sets for a backend.
-    External parameter files supply only args/env, never these protected sets.
+    Baseline launch.sh receives CHECKPOINT and searched options. The candidate's
+    installed server.launch receives only the suite's read-only checkpoint.
     """
 
     script: Path
@@ -29,39 +26,12 @@ class Launch:
     fixed_options: frozenset[str] = frozenset()
     fixed_env: frozenset[str] = frozenset()
 
-    @property
-    def needs_checkpoint(self) -> bool:
-        """Detect the reserved input, excluding comments and filled assignments."""
-        lines = [
-            line
-            for line in self.script.read_text().splitlines()
-            if not line.lstrip().startswith("#")
-        ]
-        source = "\n".join(lines)
-        input_pattern = r"\$(?:CHECKPOINT\b|\{CHECKPOINT(?:\}|[:?+\-=]))"
-        source = re.sub(
-            r"\$\{CHECKPOINT:?-([^}]+)\}",
-            lambda match: match.group(1) if match.group(1).strip("\"'").strip() else match.group(0),
-            source,
-        )
-        if not re.search(input_pattern, source):
-            return False
-        for line in source.splitlines():
-            assignment = re.match(
-                r"\s*(?:export\s+)?CHECKPOINT=(?:\"([^\"]*)\"|'([^']*)'|([^\s;#]*))", line
-            )
-            if assignment:
-                value = next(value for value in assignment.groups() if value is not None)
-                if value and not re.search(input_pattern, value):
-                    return False
-        return True
-
     def prepare(self) -> tuple[list[str], dict[str, str]]:
-        """Validate tuning and supply weights only when the script leaves them open.
-
-        Run immediately before startup so changed parameters are checked too.
-        Every script serves `served` at ENDPOINT; the port is never substituted.
-        """
+        """Validate external tuning, then apply the caller's fixed checkpoint."""
+        if self.script.name == "server.launch":
+            if self.checkpoint is None or self.args or self.env:
+                raise ValueError("server.launch requires one fixed checkpoint and no tuning inputs")
+            return [str(self.script.resolve()), self.checkpoint], {}
         for arg in self.args:
             option = arg.split("=", 1)[0]
             if option in FIXED_OPTIONS | self.fixed_options:
@@ -70,8 +40,6 @@ class Launch:
         if conflicts:
             raise ValueError(f"environment {', '.join(sorted(conflicts))} is fixed by the launch")
         environment = dict(self.env)
-        if self.needs_checkpoint:
-            if self.checkpoint is None:
-                raise ValueError(f"{self.script} requires a mapped CHECKPOINT")
+        if self.checkpoint is not None:
             environment["CHECKPOINT"] = self.checkpoint
         return ["/bin/bash", str(self.script.resolve()), *self.args], environment

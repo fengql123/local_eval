@@ -5,81 +5,60 @@
 Use Python 3.12+ and uv:
 
 ```bash
-uv sync --locked
+uv sync --locked --extra host
 uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
+uv run ruff check eval tests
+uv run ruff format --check eval tests
 ```
 
-The lockfile fixes runtime, host and development dependencies. Phase 2 puts
-Harbor, Hugging Face datasets/downloads and Jinja rendering in the `host` extra.
-Development includes that extra; the task image installs only the base runtime
-(PyYAML, HTTPX, Math-Verify with its ANTLR runtime, and Harbor Rewardkit).
-Inference extras are not needed for answer grading. The selected Rewardkit
-agent-judge CLI must be available in the supplied image; search/coding
-integrations remain Harbor adapter responsibilities.
+The coordinator uses Harbor, Hugging Face datasets and Jinja. Task images install
+the protected evaluator runtime and Harbor Rewardkit; native Harbor adapters own
+agent installation and authentication. Baseline installers run in the sandbox,
+not during image construction. Device Dockerfiles contain general prerequisites.
 
 ## Scope and tests
 
-Implement only the current phase. Keep configuration, catalog metadata, device
-observation, timing, and agent-cost accounting with their owners. Installation and launches
-belong to supplied device Dockerfiles and category baseline install.sh/launch.sh scripts. There is
-no generated-image layer or tuning allowlist.
+Keep configuration, task generation, providers, replay, grading and coding costs
+with their existing owners. Search, public development and private verification
+share the same replay toolkit. Docker and Daytona share its scheduling, handoffs,
+workspace checkpoints and recovery; provider code handles transport and lifecycle.
 
-Each test area has **two common cases and two edge cases**. Use explicit,
-small evidence: hand-calculated timing windows, saved hardware replies, and the
-local Harbor usage fixture. Do not add large parameter matrices or shared test
-infrastructure for later phases. Phase 3 uses `tests/http_server.py` as a shared
-local HTTP/SSE fixture for its implemented client and measurement tests. Its
-replay tests read the supplied public parquet rows from the sibling
-`edge-harness-v2/local_eval_data/` or `LOCAL_EVAL_DATA` directory. Phase 4 reuses
-that HTTP fixture for shared quality replay and verifier tests. Its native
-Rewardkit integration is checked with a substituted paid backend; role commands
-and firewall operations use explicit doubles without modifying the host firewall.
-Four opt-in `tests/test_oracle.py` cases also start real Harbor trials in an
-existing production device image with actual Claude Code review. Run them with
-`LOCAL_EVAL_HARBOR_TESTS=1`; they test the lifecycle, permissions and source
-review, rather than model inference or production GPU performance. Native Harbor
-oracle submissions pass the ordinary verification gates.
-Phase 2 checks the actual Harbor task schema and Compose configuration; tests
-replace the job execution boundary rather than starting paid jobs or GPU builds.
+Keep tests focused: two common cases and two edge cases for an area are normally
+enough. Use small evidence and local HTTP/SSE fixtures. Recording and replay tests
+read accepted public rows from untracked `data/dataset/`; `LOCAL_EVAL_DATA` may
+point at another complete HF release. Isolate HF caches for generated test datasets.
+Do not download checkpoints or start paid agents in the default suite.
 
-Update the README's config table, API reference, and working example when an
-interface changes. Separate actual check results from planned acceptance. Keep
-credentials, caches, models, and run outputs outside source control; `images/`
-contains authored source assets and must remain tracked.
+Production integration checks are explicit:
 
-## Phase review process
+```bash
+LOCAL_EVAL_VERIFY_IMAGE=<production-verification-image> \
+  uv run pytest -q tests/test_verification_access.py
+LOCAL_EVAL_HARBOR_TESTS=1 uv run pytest -q tests/test_oracle.py
+```
 
-1. Implement the current phase and its focused behaviour tests.
-2. Present the changed files, API responsibilities, execution example, check
-   results, and limitations.
-3. Stop for owner review. Do not begin the next phase or commit before approval.
-4. After approval, create one commit for that phase using a conventional message,
-   such as `feat: add independent evaluation foundations`.
+The first checks real Unix permissions and protected evaluator processes. Oracle
+checks run native Harbor jobs, acquire models and use the configured reviewer;
+they require suitable hardware, disk, network and credentials. Report these checks
+separately from HTTP fixtures and actual model performance measurements.
 
-| Phase | Deliverable | Inputs needed |
-| --- | --- | --- |
-| 1 | Config, catalogs, baseline metadata, device, metrics, costs | No dataset or image builds |
-| 2 | Setup, model assets, native search/coding task contract, foreground run/resume | Acquisition/rendering fixtures; supplied images/scripts for production builds |
-| 3 | Launch, servers, HTTP clients, recorded replay, measurement (committed `efd3650`) | Supplied local public recordings; CPU and loopback HTTP |
-| 4 | Accuracy, fresh verification, conversion/install/freeze, Rewardkit, quality/timing and native Harbor oracle (approved) | Supplied rows, CPU regressions and four opt-in Harbor/Docker trials |
-| 5 | Supplied category Dockerfiles, baseline install/launch scripts and read-only/offline weight assets | Owner-supplied image/script sources and target hardware |
-| 6 | Real native search/coding/verification acceptance: measured tuning, final quality/timing, resume and coding costs | Accepted Phase 5 assets, recorded rows, weight shards and agent credentials |
+## Data and run files
 
-The separate recording package is added when its implementation starts, after its
-shared server/protocol prerequisites are available.
+The canonical HF release has `workloads` and `quality` configurations. Model quality
+ranges belong in `tables/quality.csv`; offline evidence belongs to its run. Keep
+`requests[].tool` as recorded seconds, even for workloads that ignore it. Changes
+to batching, tool waits, reset/warmup or timing arithmetic change the replay
+protocol and must not silently resume an old measurement under new semantics.
 
-## Documentation
+All execution state, agent histories, handoffs, results and recovery checkpoints
+belong under `runs/<uuid>/`. Do not introduce global campaign scripts or generated
+artifact directories. Use temporary directories for development probes and remove
+them afterward. Credentials, model caches and datasets stay out of Git.
 
-The README covers purpose, prerequisites, working commands, and all config fields.
-The benchmark specification defines workloads, trusted columns, and metrics; the
-reference explains implemented APIs with actual examples. The review packet records
-what is ready for review and what remains for later phases. Label future interfaces
-clearly instead of offering commands that are not implemented.
+## Review and documentation
 
-Useful examples of this organization include
-[Terminal-Bench](https://github.com/harbor-framework/terminal-bench),
-[its contributor guide](https://github.com/harbor-framework/terminal-bench/blob/main/CONTRIBUTING.md),
-and [SWE-bench's quickstart](https://github.com/SWE-bench/SWE-bench/blob/main/docs/guides/quickstart.md).
-Harbor's lifecycle/task format is described in [its documentation](https://docs.harborframework.com/).
+Update the README configuration table, working example, benchmark specification
+and API reference when their behavior changes. Explain the problem, resulting
+behavior, review order, validation and remaining limitations. Keep examples based
+on actual supported workflows. Do not commit until the owner approves; an approved
+implementation phase is one conventional commit.

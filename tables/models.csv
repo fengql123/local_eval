@@ -1,0 +1,8 @@
+model,checkpoint
+Qwen3.8-Flash-Next,RadixArk/Qwen3.8-Flash-Next-NVFP4
+GLM-5.3-Flash,RedHatAI/GLM-5.3-Flash-NVFP4
+DeepSeek-V4-Flash-0731,deepseek-ai/DeepSeek-V4-Flash-0731
+DeepSeek-V4.1-Flash,deepseek-ai/DeepSeek-V4.1-Flash
+MiniMax-M3,nvidia/MiniMax-M3-NVFP4
+Qwen3.8-27B,RadixArk/Qwen3.8-27B-NVFP4
+Qwen3.6-35B-A3B,nvidia/Qwen3.6-35B-A3B-NVFP4

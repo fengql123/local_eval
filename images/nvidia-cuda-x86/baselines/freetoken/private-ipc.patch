@@ -1,0 +1,54 @@
+--- a/python/freetoken/scheduler/config.py
++++ b/python/freetoken/scheduler/config.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import tempfile
+ from dataclasses import dataclass, field
+ 
+ from freetoken.engine import EngineConfig
+@@ -24,15 +25,15 @@
+ 
+     @property
+     def zmq_backend_addr(self) -> str:
+-        return "ipc:///tmp/freetoken_0" + self._unique_suffix
++        return f"ipc://{tempfile.gettempdir()}/freetoken_0" + self._unique_suffix
+ 
+     @property
+     def zmq_detokenizer_addr(self) -> str:
+-        return "ipc:///tmp/freetoken_1" + self._unique_suffix
++        return f"ipc://{tempfile.gettempdir()}/freetoken_1" + self._unique_suffix
+ 
+     @property
+     def zmq_scheduler_broadcast_addr(self) -> str:
+-        return "ipc:///tmp/freetoken_2" + self._unique_suffix
++        return f"ipc://{tempfile.gettempdir()}/freetoken_2" + self._unique_suffix
+ 
+     @property
+     def max_forward_len(self) -> int:
+--- a/python/freetoken/server/args.py
++++ b/python/freetoken/server/args.py
+@@ -3,6 +3,7 @@
+ import argparse
+ import json
+ import os
++import tempfile
+ from dataclasses import dataclass, field
+ from typing import List, Tuple
+ 
+@@ -80,13 +81,13 @@
+ 
+     @property
+     def zmq_frontend_addr(self) -> str:
+-        return "ipc:///tmp/freetoken_3" + self._unique_suffix
++        return f"ipc://{tempfile.gettempdir()}/freetoken_3" + self._unique_suffix
+ 
+     @property
+     def zmq_tokenizer_addr(self) -> str:
+         if self.share_tokenizer:
+             return self.zmq_detokenizer_addr
+-        result = "ipc:///tmp/freetoken_4" + self._unique_suffix
++        result = f"ipc://{tempfile.gettempdir()}/freetoken_4" + self._unique_suffix
+         assert result != self.zmq_detokenizer_addr
+         return result
+ 

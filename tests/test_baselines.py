@@ -1,66 +1,102 @@
-"""Baseline mappings: two common selections and two empty-selection edges."""
+"""Baseline selection, installation and explicit acquired checkpoint paths."""
 
-import json
+from pathlib import Path
 
-from eval.baselines import mapping, mappings, needed, resolve_launch
+import pytest
+
+from eval.baselines import install, mapping, mappings, needed, resolve_launch
 
 
-def test_mapping_supplies_source_and_baseline_checkpoints(tmp_path):
-    item = mapping("nvidia-cuda-x86", "C2", "freetoken")
-    assert item.source_model_checkpoint == "Qwen/Qwen3.6-35B-A3B"
-    assert item.checkpoint == "nvidia/Qwen3.6-35B-A3B-NVFP4"
-    assert str(item.launch_script) == "images/nvidia-cuda-x86/baselines/freetoken/launch.sh"
-    assert mappings("nvidia-cuda-x86", item.model)[0] == item
+def recipe(root, name, body="echo installed >> calls.txt"):
+    folder = root / "nvidia-cuda-x86" / name
+    folder.mkdir(parents=True)
+    (folder / "install.sh").write_text("#!/bin/bash\nset -eu\n" + body + "\n")
+    (folder / "launch.sh").write_text('exec engine "$CHECKPOINT"\n')
+    return folder
+
+
+@pytest.mark.parametrize(
+    "model,source,checkpoint",
+    [
+        ("Qwen3.8-Flash-Next", "Qwen/Qwen3.8-Flash-Next", "RadixArk/Qwen3.8-Flash-Next-NVFP4"),
+        (
+            "DeepSeek-V4.1-Flash",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+        ),
+    ],
+)
+def test_mapped_baseline_uses_explicit_local_checkpoint(
+    tmp_path, monkeypatch, model, source, checkpoint
+):
+    item = mapping("nvidia-cuda-x86", model, "freetoken")
+    assert item.checkpoint == checkpoint
     launch = tmp_path / item.launch_script
-    launch.parent.mkdir(parents=True)
-    launch.write_text('exec engine serve "$CHECKPOINT" --port 8000\n')
-    assert resolve_launch(launch, "C2", "S-1") == ("freetoken", item.checkpoint)
-
-
-def test_needed_deduplicates_shared_engines_and_copied_template_uses_task_reference(tmp_path):
-    assert needed("nvidia-cuda-x86", ("C2", "C1")) == ("freetoken", "llama.cpp", "ollama")
-    assert needed("apple-silicon", ("C2", "C1")) == ("llama.cpp", "ollama", "mlx-serve")
-    launch = tmp_path / "launch.sh"
-    launch.write_text('exec engine serve "$CHECKPOINT" --port 8000\n')
-    task = {
-        "category": "nvidia-cuda-x86",
-        "model": "C2",
-        "workload": "A-N",
-        "assets": {"baselines": {"freetoken": {"checkpoint": "/models/nvfp4"}}},
+    assert resolve_launch(launch, item.model, "A-1") == ("freetoken", item.checkpoint)
+    assert {
+        entry.baseline: entry.checkpoint for entry in mappings("nvidia-cuda-x86", "MiniMax-M3")
+    } == {
+        "freetoken": "nvidia/MiniMax-M3-NVFP4",
+        "llama.cpp": "AesSedai/MiniMax-M3-GGUF",
+        "ollama": "AesSedai/MiniMax-M3-GGUF",
     }
-    assert resolve_launch(launch, "C2", "A-N", task=task, reference={"baseline": "freetoken"}) == (
+    monkeypatch.setenv("CHECKPOINT", "/workspace/weights/fp4")
+    assert resolve_launch(launch, item.model, "A-1") == ("freetoken", "/workspace/weights/fp4")
+
+
+def test_selected_recipe_installs_once_and_carries_patches(tmp_path):
+    recipes, workspace = tmp_path / "recipes", tmp_path / "baselines"
+    original = recipe(recipes, "freetoken", "cat fix.patch >> calls.txt")
+    (original / "fix.patch").write_text("installed\n")
+    task = {
+        "device_category": "nvidia-cuda-x86",
+        "assets": {"baselines": {"freetoken": "owner/fp4"}},
+    }
+    install(task, recipes=recipes, workspace=workspace)
+    install(task, recipes=recipes, workspace=workspace)
+    assert (workspace / "nvidia-cuda-x86/freetoken/calls.txt").read_text() == "installed\n"
+    assert needed("nvidia-cuda-x86", ("Qwen3.8-27B", "Qwen3.6-35B-A3B")) == (
         "freetoken",
-        "/models/nvfp4",
-    )
-    selected = {"baseline": "freetoken", "checkpoint": "/models/reference"}
-    assert resolve_launch(launch, "C2", "A-N", task=task, reference=selected) == (
-        "freetoken",
-        "/models/reference",
+        "llama.cpp",
+        "ollama",
     )
 
 
-def test_category_without_rows_and_complete_candidate_need_no_mapping(tmp_path):
-    assert mappings("no-device", "C2") == ()
-    assert needed("no-device", ("C2",)) == ()
-    launch = tmp_path / "launch.sh"
-    launch.write_text("exec engine serve /workspace/weights/optimized --port 8000 --workers 4\n")
-    assert resolve_launch(launch, "C2", "A-MA") == ("candidate", None)
-
-
-def test_model_without_category_mapping_and_native_checkpoint_identifier(tmp_path, monkeypatch):
-    assert mappings("nvidia-cuda-x86", "N4") == ()
+def test_candidate_and_unmapped_device_do_not_guess_weights(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHECKPOINT", "/unexpected/reference")
+    for script in (tmp_path / "submission/launch.sh", Path("/launch.sh"), Path("/app/launch.sh")):
+        assert resolve_launch(script, "Qwen3.8-27B", "A-MA") == ("candidate", None)
+    assert mappings("unknown", "Qwen3.8-27B") == ()
     assert needed("nvidia-cuda-x86", ()) == ()
-    launch = tmp_path / "launch.sh"
-    launch.write_text('exec engine serve "${CHECKPOINT}" --port 8000\n')
-    native = mapping("nvidia-cuda-x86", "C2", "ollama").checkpoint
-    (tmp_path / "reference.json").write_text(
-        json.dumps(
-            {
-                "category": "nvidia-cuda-x86",
-                "baseline": "ollama",
-                "checkpoint": native,
-            }
-        )
+
+
+def test_partial_install_retries_but_failed_install_is_not_complete(tmp_path):
+    recipes, workspace = tmp_path / "recipes", tmp_path / "baselines"
+    original = recipe(
+        recipes,
+        "freetoken",
+        "echo compiler-failure >&2; printf '%05000d\\n' 0 >&2; exit 17",
     )
-    monkeypatch.chdir(tmp_path)
-    assert resolve_launch(launch, "C2", "S-N") == ("ollama", native)
+    task = {
+        "device_category": "nvidia-cuda-x86",
+        "assets": {"baselines": {"freetoken": "owner/fp4"}},
+    }
+    target = workspace / "nvidia-cuda-x86/freetoken"
+    target.mkdir(parents=True)
+    (target / "partial").touch()
+    with pytest.raises(RuntimeError, match="installation exited 17") as failure:
+        install(task, recipes=recipes, workspace=workspace)
+    assert "compiler-failure" in str(failure.value)
+    assert not (target / ".installed").exists() and not (target / "partial").exists()
+    (original / "install.sh").write_text("echo success > result\n")
+    install(task, recipes=recipes, workspace=workspace)
+    assert (target / "result").read_text() == "success\n"
+
+
+def test_model_catalog_has_canonical_checkpoints_independent_of_device():
+    from eval.config import model, models
+
+    assert len(models()) == 7
+    assert model("MiniMax-M3").checkpoint == "nvidia/MiniMax-M3-NVFP4"
+    assert model("GLM-5.3-Flash").checkpoint == "RedHatAI/GLM-5.3-Flash-NVFP4"
+    assert all(item.checkpoint for item in models())

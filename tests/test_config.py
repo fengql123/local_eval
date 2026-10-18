@@ -1,120 +1,169 @@
+"""Two normal config cases and two invalid-input boundaries."""
+
 import pytest
 
 from eval.config import (
-    QUALITY_SUBSET,
-    AgentConfig,
     TaskSelection,
     load_config,
+    model,
     parse_config,
     reviewer_env,
     select_tasks,
 )
 
 
-def test_task_filters_select_their_intersection():
-    config = parse_config({"tasks": {"models": ["C2"], "workloads": ["S-1"], "types": ["SOTA"]}})
-    assert [(task.task_id, task.model) for task in select_tasks(config.tasks)] == [
-        ("qwen36-35b-a3b_S-1", "Qwen3.6-35B-A3B")
-    ]
-    assert QUALITY_SUBSET == 24
-    assert config.search.agent.name == "claude-code"
-    assert config.search.agent.model is None
-    assert config.evaluation.agent.name == "claude-code"
-    assert config.evaluation.agent.model is None
-    assert config.evaluation.agent.auth == "login"
-    assert config.evaluation.agent.budget_seconds == 1800
+def configured(value, **kwargs):
+    agent = {"name": "claude-code", "kwargs": {"reasoning_effort": "xhigh"}}
+    return parse_config(
+        {
+            **value,
+            "search": {"agent": agent, **value.get("search", {})},
+            "evaluation": {"agent": agent, **value.get("evaluation", {})},
+        },
+        **kwargs,
+    )
+
+
+def test_local_config_uses_declared_category_and_native_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret-test-value")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REWARDKIT_FORCE_SUBSCRIPTION", raising=False)
+    config = configured(
+        {
+            "tasks": {"models": ["Qwen3.6-35B-A3B"], "workloads": ["S-1"]},
+            "environment": {
+                "device_category": "nvidia-cuda-x86",
+                "kwargs": {"gpu_ids": [0, "GPU-example"]},
+            },
+            "agent": {
+                "name": "custom.module:Agent",
+                "kwargs": {"reasoning_effort": "high", "option": "value"},
+            },
+        },
+        base=tmp_path,
+    )
+    assert config.environment.kwargs == {"gpu_ids": [0, "GPU-example"]}
+    assert not hasattr(config.environment, "storage")
+    assert config.environment.device_category == "nvidia-cuda-x86"
+    assert config.agent.name == "custom.module:Agent" and config.agent.model is None
+    assert config.agent.kwargs == {"reasoning_effort": "high", "option": "value"}
     assert reviewer_env(config.evaluation.agent) == ("CLAUDE_CODE_OAUTH_TOKEN",)
-    assert reviewer_env(AgentConfig("codex")) == (
-        "CODEX_AUTH_JSON",
-        "REWARDKIT_FORCE_SUBSCRIPTION",
-    )
-    assert reviewer_env(AgentConfig("codex", auth="api_key")) == ("OPENAI_API_KEY",)
-    fx = parse_config({"evaluation": {"agent": {"name": "fx"}}})
-    assert reviewer_env(fx.evaluation.agent) == ("VERCEL_OIDC_TOKEN",)
-    fx_api = parse_config({"evaluation": {"agent": {"name": "fx", "auth": "api_key"}}})
-    assert reviewer_env(fx_api.evaluation.agent) == ("AI_GATEWAY_API_KEY",)
+    assert model("Qwen3.6-35B-A3B").name == "Qwen3.6-35B-A3B"
+    assert config.evaluation.replay_concurrency("S-N") == 32
+    assert config.evaluation.replay_concurrency("S-1") == 1
+    assert select_tasks(config.tasks)[0].task_id == "qwen36-35b-a3b_S-1"
+    assert not (tmp_path / "runs").exists()
 
 
-def test_load_config_resolves_all_authored_settings_without_side_effects(tmp_path):
+def test_cloud_native_kwargs_and_shared_yaml_agents_are_preserved(tmp_path):
     path = tmp_path / "run.yaml"
-    path.write_text(
-        """dataset: owner/recordings
-gpus: [0, GPU-example]
-tasks:
-  models: all
-  workloads: [S-N, A-N]
-  types: all
-agent:
-  name: codex
-  model: example-model
-  kwargs: {reasoning_effort: high}
-  auth: api_key
-  env: [CUSTOM_API_KEY]
-  budget: 30m
-search:
-  mode: single
-  agent:
-    name: harbor.agents.nop:NopAgent
-    kwargs: {test_option: enabled}
-    auth: api_key
-    env: [SEARCH_CREDENTIAL]
-    budget: 45m
-evaluation:
-  install_timeout: 90
-  health_timeout: 5m
-  agent:
-    name: codex
-    model: review-model
-    auth: api_key
-    env: [REVIEW_API_KEY]
-    budget: 20m
-    kwargs: {version: 0.1.0, mcp_servers: []}
+    path.write_text("""dataset: owner/prepared
+concurrency: 2
+environment:
+  provider: daytona
+  device_category: nvidia-cuda-x86
+  kwargs: {gpus: 1, gpu_types: [RTX-4090], spot: true}
+agent: &agent
+  name: claude-code
+  model: supplied-model
+  kwargs: {reasoning_effort: xhigh}
+  budget: 24h
+search: {agent: *agent}
+evaluation: {agent: *agent, concurrency: {S-N: 32, A-N: 8}}
 out: results
-"""
-    )
+""")
     config = load_config(path)
-    assert config.dataset == "owner/recordings"
-    assert config.gpus == ("0", "GPU-example")
-    assert config.tasks == TaskSelection(models=None, workloads=("S-N", "A-N"), types=None)
-    assert config.agent.name == "codex"
-    assert config.agent.model == "example-model"
-    assert config.agent.kwargs == {"reasoning_effort": "high"}
-    assert config.agent.auth == "api_key"
-    assert config.agent.env == ("CUSTOM_API_KEY",)
-    assert config.agent.budget_seconds == 1800
-    assert config.search.mode == "single"
-    assert config.search.agent.name == "harbor.agents.nop:NopAgent"
-    assert config.search.agent.model is None
-    assert config.search.agent.kwargs == {"test_option": "enabled"}
-    assert config.search.agent.auth == "api_key"
-    assert config.search.agent.env == ("SEARCH_CREDENTIAL",)
-    assert config.search.agent.budget_seconds == 2700
-    assert config.evaluation.install_timeout_seconds == 90
-    assert config.evaluation.health_timeout_seconds == 300
-    assert config.evaluation.agent.name == "codex"
-    assert config.evaluation.agent.model == "review-model"
-    assert config.evaluation.agent.auth == "api_key"
-    assert config.evaluation.agent.env == ("REVIEW_API_KEY",)
-    assert reviewer_env(config.evaluation.agent) == ("REVIEW_API_KEY",)
-    assert config.evaluation.agent.budget_seconds == 1200
-    assert config.evaluation.agent.kwargs == {"version": "0.1.0", "mcp_servers": []}
+    assert config.environment.kwargs == {"gpus": 1, "gpu_types": ["RTX-4090"], "spot": True}
+    assert all(
+        agent.kwargs["reasoning_effort"] == "xhigh"
+        for agent in (config.agent, config.search.agent, config.evaluation.agent)
+    )
     assert config.out == tmp_path / "results"
-    assert not config.out.exists()
-    custom = parse_config({"agent": {"name": "harbor.agents.nop:NopAgent"}})
-    assert custom.agent.name == "harbor.agents.nop:NopAgent"
-    assert custom.agent.model is None
-    assert parse_config({"agent": {"name": "codex", "model": None}}).agent.model is None
+    assert config.evaluation.replay_concurrency("S-N") == 32
+    assert config.evaluation.replay_concurrency("A-N") == 8
+    assert all(
+        agent.budget_seconds == 86400
+        for agent in (config.agent, config.search.agent, config.evaluation.agent)
+    )
 
 
-def test_unknown_config_field_is_rejected():
-    with pytest.raises(TypeError, match="ids"):
-        parse_config({"tasks": {"ids": ["qwen36-35b-a3b_A-N"]}})
-    with pytest.raises(ValueError, match="unknown Rewardkit agent judge"):
-        parse_config({"evaluation": {"agent": {"name": "unknown-agent"}}})
-    with pytest.raises(TypeError, match="judge_model"):
-        parse_config({"evaluation": {"judge_model": "removed-flat-field"}})
+def test_removed_fields_and_invalid_resource_selection_are_rejected():
+    for value in (
+        {"gpus": [0]},
+        {"storage": {}},
+        {"environment": {"storage": {"persistent": True}}},
+        {"environment": {"image": "unused"}},
+        {"agent": {"name": "codex", "auth": "login"}},
+    ):
+        with pytest.raises(TypeError):
+            configured(value)
+    with pytest.raises(ValueError, match="local GPU IDs"):
+        configured({"environment": {"provider": "daytona", "kwargs": {"gpu_ids": [0]}}})
+    for value in (0, -1, "2", True):
+        with pytest.raises(ValueError, match="concurrency"):
+            configured({"concurrency": value})
+    for value in (7, -1, {"S-N": 15}, {"A-1": 8}):
+        with pytest.raises(ValueError, match="evaluation.concurrency"):
+            configured({"evaluation": {"concurrency": value}})
 
 
-def test_empty_task_intersection_is_rejected():
+def test_empty_task_intersection_and_unknown_reviewer_are_rejected():
     with pytest.raises(ValueError, match="select no tasks"):
-        select_tasks(TaskSelection(models=("C2",), types=("NEW",)))
+        select_tasks(TaskSelection(models=("Qwen3.6-35B-A3B",), workloads=()))
+    with pytest.raises(ValueError, match="unknown Rewardkit"):
+        configured({"evaluation": {"agent": {"name": "unknown"}}})
+
+
+def test_classification_is_not_a_config_filter_and_slo_settings_parse():
+    assert len(select_tasks(TaskSelection())) == 35
+    with pytest.raises(TypeError, match="types"):
+        configured({"tasks": {"types": ["SLO"]}})
+    assert configured({}).evaluation.concurrency == {"S-N": 32, "A-N": 8}
+    evaluation = configured(
+        {"evaluation": {"slo_budget": "2h", "slo_request_cap": "5m", "slo_repeats": 3}}
+    ).evaluation
+    assert (evaluation.slo_budget_seconds, evaluation.slo_request_cap_seconds) == (7200, 300)
+    assert evaluation.slo_repeats == 3
+    assert (
+        configured({"evaluation": {"quality_timeout": "2h"}}).evaluation.quality_timeout_seconds
+        == 7200
+    )
+    defaults = configured({}).evaluation
+    assert (defaults.slo_budget_seconds, defaults.slo_request_cap_seconds) == (21600, 600)
+    assert defaults.quality_timeout_seconds == 18000
+    with pytest.raises(ValueError, match="slo_repeats"):
+        configured({"evaluation": {"slo_repeats": 0}})
+
+
+@pytest.mark.parametrize("location", ["agent", "agents.second", "search.agent", "evaluation.agent"])
+def test_every_agent_requires_an_explicit_reasoning_effort(location):
+    agent = {"name": "codex", "kwargs": {"reasoning_effort": "xhigh"}}
+    value = {"agent": agent, "search": {"agent": agent}, "evaluation": {"agent": agent}}
+    missing = {"name": "codex"}
+    if location == "agent":
+        value["agent"] = missing
+    elif location == "agents.second":
+        value.pop("agent")
+        value["agents"] = {"first": agent, "second": missing}
+    else:
+        value[location.split(".")[0]] = {"agent": missing}
+    with pytest.raises(ValueError, match=rf"{location}\.kwargs\.reasoning_effort"):
+        parse_config(value)
+    # Omitting the whole search/reviewer mapping cannot silently choose an effort.
+    if location in ("search.agent", "evaluation.agent"):
+        value.pop(location.split(".")[0])
+        with pytest.raises(ValueError, match=rf"{location}\.kwargs\.reasoning_effort"):
+            parse_config(value)
+
+
+@pytest.mark.parametrize("effort", [None, "", "  ", 1])
+def test_reasoning_effort_cannot_be_empty_or_implicit(effort):
+    with pytest.raises(ValueError, match="evaluation.agent.kwargs.reasoning_effort"):
+        configured(
+            {
+                "evaluation": {
+                    "agent": {"name": "claude-code", "kwargs": {"reasoning_effort": effort}}
+                }
+            }
+        )

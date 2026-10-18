@@ -1,263 +1,229 @@
-"""Phase 2 acquisition mapping with synthetic HF rows; no dataset or model download."""
+"""Prepared HF inputs: two common cases and two preparation boundaries."""
 
+import asyncio
 import json
-import os
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
+from test_quality_suite import questions
 
 from eval import setup
-from eval.baselines import needed
-from eval.config import CALIBRATION_SUBSET, QUALITY_SUBSET, SEED, parse_config
-from eval.device import GPU, Machine
-from eval.models import ModelAsset
+from eval.config import parse_config
+
+MODEL = "Qwen3.6-35B-A3B"
 
 
-def _source(pool, split):
-    def row(identity, model="C2"):
-        content = [{"type": "text", "text": "Question"}]
-        tools = [
-            {"type": "function", "function": {"name": "tool", "parameters": {"type": "object"}}}
-        ]
-        return {
-            "id": identity,
-            "model": model,
-            "requests": [
-                {
-                    "id": "r1",
-                    "parents": [],
-                    "tool": 0.0,
-                    "out": 12,
-                    "messages": [{"role": "user", "content": content}],
-                    "tools": tools if identity == f"{pool}-1" else [],
-                }
-            ],
-            "evaluation": {"method": "choice", "answer": "A"},
-            "extra": '{"prepared_metadata": "preserve as supplied"}',
-        }
-
-    rows = (
-        [row(f"{pool}-public")]
-        if split == "public"
-        else [row(f"{pool}-{index}") for index in range(60)]
-    )
-    return Dataset.from_list([*rows, row("other-model", model="C1")])
-
-
-def _read(path):
-    return [json.loads(line) for line in (Path(path) / "rows.jsonl").read_text().splitlines()]
-
-
-def _arrange(tmp_path, monkeypatch, workloads=("S-1",)):
+def arrange(tmp_path, monkeypatch, workloads=("A-1", "A-MA"), *, private_s_rows=8):
+    repo = tmp_path / "checkout"
+    device = repo / "images/nvidia-cuda-x86"
+    device.mkdir(parents=True)
+    (device / "Dockerfile").write_text("FROM ubuntu:22.04 AS toolchain\n")
+    for phase in ("search", "coding", "verification"):
+        (device / f"{phase}.Dockerfile").write_text("FROM toolchain\n")
+    for engine in ("freetoken", "llama.cpp", "ollama"):
+        folder = device / "baselines" / engine
+        folder.mkdir(parents=True)
+        for script in ("install.sh", "launch.sh"):
+            (folder / script).write_text("#!/bin/sh\n")
     config = parse_config(
-        {"dataset": "owner/recordings", "tasks": {"models": ["C2"], "workloads": list(workloads)}}
+        {
+            "dataset": "owner/prepared",
+            "search": {"agent": {"name": "codex", "kwargs": {"reasoning_effort": "xhigh"}}},
+            "evaluation": {"agent": {"name": "codex", "kwargs": {"reasoning_effort": "xhigh"}}},
+            "concurrency": 2,
+            "tasks": {"models": [MODEL], "workloads": list(workloads)},
+        },
+        base=tmp_path,
     )
-    machine = Machine("Linux", "x86_64", 8, 32 * 2**30, (GPU(0, "GPU-fixture", "GPU", 81920),))
-    repo = tmp_path / "repo"
-    dockerfile = repo / machine.dockerfile
-    dockerfile.parent.mkdir(parents=True)
-    dockerfile.write_text("# Synthetic source fixture; never built.\nFROM scratch\n")
-    (repo / ".dockerignore").write_text("runs/\n")
-    (repo / "images/prepare.sh").write_text("#!/bin/sh\n# Synthetic image asset; never executed.\n")
-    for engine in needed(machine.category, ("C2",)):
-        path = repo / "images" / machine.category / "baselines" / engine / "install.sh"
-        path.parent.mkdir(parents=True)
-        path.write_text("#!/bin/sh\n# Synthetic installer fixture; never executed.\n")
-        path.with_name("launch.sh").write_text(
-            "#!/bin/sh\n# Synthetic launcher fixture; never executed.\n"
+    calls = []
+
+    def load(source, name, split, **kwargs):
+        calls.append((name, split))
+        return Dataset.from_list(
+            [
+                {
+                    **row,
+                    "public": row["selection"]["workloads"] if role == "public" else [],
+                    "private": row["selection"]["workloads"] if role == "private" else [],
+                }
+                for role in ("public", "private")
+                for row in split_rows(role)
+            ]
+        ).remove_columns(["pool", "selection"])
+
+    def split_rows(split):
+        return Dataset.from_list(
+            [
+                {
+                    "id": f"{pool}-{split}-{i}",
+                    "model": MODEL,
+                    "pool": pool,
+                    "selection": {
+                        "version": "stratified-v3",
+                        "workloads": (
+                            ["S-1", "S-N"]
+                            if pool == "S"
+                            else ["A-MA"]
+                            if pool == "A-MA"
+                            else ["A-1"]
+                            if i < (10 if split == "public" else 8)
+                            else ["A-N"]
+                        ),
+                    },
+                    "requests": [],
+                    "extra": "unchanged",
+                }
+                for pool in ("S", "A", "A-MA")
+                for i in range(
+                    private_s_rows
+                    if pool == "S" and split == "private"
+                    else 20
+                    if pool == "A" and split == "public"
+                    else 16
+                    if pool == "A"
+                    else 10
+                    if split == "public"
+                    else 8
+                )
+            ]
         )
-    calls, rendered, acquired = [], [], []
-
-    def load(source, pool, *, split):
-        calls.append((source, pool, split))
-        return _source(pool, split)
-
-    def asset(source, destination):
-        acquired.append((source, destination))
-        if ":" in source:
-            return ModelAsset(source, None, source)
-        destination.mkdir(parents=True, exist_ok=True)
-        return ModelAsset(source, destination, str(destination))
-
-    def render(task, config, machine, image, run_folder, inputs, assets):
-        rendered.append((task, inputs, assets))
-        path = run_folder / "coding" / task.task_id
-        path.mkdir(parents=True)
-        return path
 
     monkeypatch.setattr(setup, "load_dataset", load)
-    monkeypatch.setattr(setup, "prepare_asset", asset)
-    monkeypatch.setattr(setup, "render_task", render)
-    return config, machine, repo, calls, rendered, acquired
+    monkeypatch.setattr("eval.quality.load_dataset", lambda *a, **k: Dataset.from_list(questions()))
+    return config, repo, calls
 
 
-def test_s_views_preserve_rows_and_sample_shared_calibration(tmp_path, monkeypatch):
-    config, machine, repo, calls, rendered, acquired = _arrange(tmp_path, monkeypatch)
-    previous_umask = os.umask(0o077)
-    try:
-        result = setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
-    finally:
-        os.umask(previous_umask)
-    views = result.inputs["C2"]["S"]
-    assert set(result.assets["C2"]) == {"root", "source", "baselines"}
-    source_asset = result.assets["C2"]["source"]
-    assert source_asset["source"] == "Qwen/Qwen3.6-35B-A3B"
-    assert Path(source_asset["path"]) == tmp_path / "run" / "models" / "C2" / "source"
-    assert source_asset["checkpoint"] == source_asset["path"]
-    baseline_assets = result.assets["C2"]["baselines"]
-    assert baseline_assets["freetoken"]["source"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
-    assert Path(baseline_assets["freetoken"]["path"]) == (
-        tmp_path / "run" / "models" / "C2" / "baselines" / "freetoken"
+def test_local_prepared_model_splits_are_reused_without_copy_or_sampling(tmp_path, monkeypatch):
+    config, repo, calls = arrange(tmp_path, monkeypatch, workloads=("A-1", "A-N", "A-MA"))
+    result = asyncio.run(setup.prepare(config, tmp_path / "run", repo_root=repo))
+    assert calls == [("workloads", "records")]
+    assert (
+        load_from_disk(result.inputs[MODEL]["A-MA"]["public"]["source"])[0]["id"] == "A-MA-public-0"
     )
-    assert baseline_assets["freetoken"]["checkpoint"] == baseline_assets["freetoken"]["path"]
-    assert acquired == [
-        (source_asset["source"], Path(source_asset["path"])),
-        (baseline_assets["freetoken"]["source"], Path(baseline_assets["freetoken"]["path"])),
-        (baseline_assets["llama.cpp"]["source"], Path(baseline_assets["llama.cpp"]["path"])),
+    assert not tuple((tmp_path / "run").rglob("*.jsonl"))
+    assert (tmp_path / "run/prepared.json").exists()
+    metadata = json.loads(
         (
-            baseline_assets["ollama"]["source"],
-            Path(result.assets["C2"]["root"]) / "baselines/ollama",
-        ),
-    ]
-    assert baseline_assets["ollama"]["path"] is None
-    assert Path(result.assets["C2"]["root"]).stat().st_mode & 0o777 == 0o755
-    baseline_store = Path(result.assets["C2"]["root"]) / "baselines"
-    assert baseline_store.stat().st_mode & 0o777 == 0o755
-    assert sorted(path.name for path in baseline_store.iterdir()) == ["freetoken", "llama.cpp"]
-    assert Path(views["public"]).stat().st_mode & 0o777 == 0o755
-    assert (Path(views["public"]) / "rows.jsonl").stat().st_mode & 0o777 == 0o644
-    assert Path(views["calibration"]).stat().st_mode & 0o777 == 0o755
-    assert (Path(views["calibration"]) / "rows.jsonl").stat().st_mode & 0o777 == 0o644
-    for protected in ("private", "quality"):
-        assert Path(views[protected]).stat().st_mode & 0o777 == 0o700
-        assert (Path(views[protected]) / "rows.jsonl").stat().st_mode & 0o777 == 0o600
-    assert [row["id"] for row in _read(views["public"])] == ["S-public"]
-    private = _read(views["private"])
-    expected = _source("S", "private").filter(lambda row: row["model"] == "C2")
-    assert private == list(expected)
-    assert private[0]["requests"][0]["messages"][0]["content"] == [
-        {"type": "text", "text": "Question"}
-    ]
-    assert private[1]["requests"][0]["tools"][0]["function"]["parameters"] == {"type": "object"}
-    assert private[0]["evaluation"] == {"method": "choice", "answer": "A"}
-    assert private[0]["extra"] == '{"prepared_metadata": "preserve as supplied"}'
-    assert all("calibration" not in row for row in private)
-    calibration = [row["id"] for row in _read(views["calibration"])]
-    quality = [row["id"] for row in _read(views["quality"])]
-    assert len(set(calibration)) == CALIBRATION_SUBSET
-    assert len(set(quality)) == QUALITY_SUBSET
-    assert calibration == expected.shuffle(seed=SEED).select(range(CALIBRATION_SUBSET))["id"]
-    assert quality == expected.shuffle(seed=SEED + 1).select(range(QUALITY_SUBSET))["id"]
-    assert set(calibration + quality) <= {row["id"] for row in private}
-    # Independent samples may overlap; the private timing membership stays intact.
-    assert calls == [(config.dataset, "S", "public"), (config.dataset, "S", "private")]
-    assert rendered[0][1] == views
-    repeated = setup.prepare(config, tmp_path / "repeat", repo_root=repo, machine=machine)
-    repeated_views = repeated.inputs["C2"]["S"]
-    assert [row["id"] for row in _read(repeated_views["quality"])] == quality
-    assert [row["id"] for row in _read(repeated_views["calibration"])] == calibration
-    marker = json.loads((tmp_path / "run" / "prepared.json").read_text())
-    assert marker["task_paths"] == [str(path) for path in result.task_paths]
+            tmp_path / "run/tasks/search" / result.task_paths[0].name / "environment/task.json"
+        ).read_text()
+    )
+    assert metadata["device_category"] == "nvidia-cuda-x86" and "machine" not in metadata
+    assert "public_s" not in metadata["inputs"]
+    a1 = load_from_disk(result.inputs[MODEL]["A-1"]["private"]["source"])
+    an = load_from_disk(result.inputs[MODEL]["A-N"]["private"]["source"])
+    assert len(a1) == len(an) == 8
+    assert a1[0]["id"] == "A-private-0" and an[0]["id"] == "A-private-8"
+    assert (
+        result.inputs[MODEL]["A-1"]["private"]["identity"]
+        != (result.inputs[MODEL]["A-N"]["private"]["identity"])
+    )
 
 
-def test_agentic_only_tasks_share_s_calibration_and_quality_with_source_reuse(
+def test_cloud_maps_selected_hf_views_on_coordinator_without_weight_acquisition(
     tmp_path, monkeypatch
 ):
-    config, machine, repo, calls, rendered, acquired = _arrange(
-        tmp_path, monkeypatch, ("A-N", "A-MA")
+    config, repo, calls = arrange(tmp_path, monkeypatch)
+    config = replace(
+        config,
+        environment=replace(
+            config.environment,
+            provider="daytona",
+            kwargs={"gpus": 1, "gpu_types": ["RTX-4090"]},
+        ),
     )
-    entries = setup.mappings(machine.category, "C2")
-    entries = tuple(
-        replace(entry, checkpoint=entry.source_model_checkpoint)
-        if entry.baseline == "freetoken"
-        else entry
-        for entry in entries
-    )
-    monkeypatch.setattr(setup, "mappings", lambda category, name: entries)
-    result = setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
-    views = result.inputs["C2"]
-    assert result.assets["C2"]["source"] == result.assets["C2"]["baselines"]["freetoken"]
-    assert not (tmp_path / "run" / "models" / "C2" / "baselines" / "freetoken").exists()
-    assert set(views) == {"A", "A-MA", "S"}
-    assert set(views["S"]) == {"public", "calibration", "quality"}
-    assert {(pool, split) for _, pool, split in calls} == {
-        ("A", "public"),
-        ("A", "private"),
-        ("A-MA", "public"),
-        ("A-MA", "private"),
-        ("S", "private"),
-        ("S", "public"),
-    }
-    assert len(calls) == 6
-    quality = views["S"]["quality"]
-    assert len(_read(quality)) == QUALITY_SUBSET
-    assert len(rendered) == 2 and all(inputs["quality"] == quality for _, inputs, _ in rendered)
-    calibration = views["S"]["calibration"]
-    assert len(_read(calibration)) == CALIBRATION_SUBSET
-    assert all(inputs["calibration"] == calibration for _, inputs, _ in rendered)
-    assert all(inputs["public_s"] == views["S"]["public"] for _, inputs, _ in rendered)
-    assert all(row["id"].startswith("S-") for row in _read(calibration))
-    assert acquired == [
-        (entries[0].source_model_checkpoint, Path(result.assets["C2"]["source"]["path"])),
-        (entries[1].checkpoint, Path(result.assets["C2"]["baselines"]["llama.cpp"]["path"])),
-        (entries[2].checkpoint, Path(result.assets["C2"]["root"]) / "baselines/ollama"),
-    ]
-    for pool in ("A", "A-MA"):
-        assert set(views[pool]) == {"public", "private"}
-        assert len(_read(views[pool]["private"])) == 60
+
+    result = asyncio.run(setup.prepare(config, tmp_path / "run", repo_root=repo))
+    assert calls == [("workloads", "records")]
+    assert "S" not in result.inputs[MODEL] and "quality" not in result.inputs[MODEL]
+    assert not (tmp_path / "run/assets").exists()
+    assert not (tmp_path / "run/build-context/setup.Dockerfile").exists()
 
 
-def test_missing_supplied_scripts_stop_before_any_acquisition(tmp_path, monkeypatch):
-    config, machine, repo, calls, rendered, acquired = _arrange(tmp_path, monkeypatch)
-    installer = (
-        Path("images")
-        / machine.category
-        / "baselines"
-        / needed(machine.category, ("C2",))[0]
-        / "install.sh"
-    )
-    (repo / installer).unlink()
-    monkeypatch.setattr(setup, "prepare_asset", lambda *args: pytest.fail("must not download"))
-    with pytest.raises(FileNotFoundError, match="install.sh"):
-        setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
-    (repo / installer).write_text("#!/bin/sh\n")
-    (repo / installer.with_name("launch.sh")).unlink()
+def test_missing_baseline_script_stops_before_acquisition(tmp_path, monkeypatch):
+    config, repo, calls = arrange(tmp_path, monkeypatch)
+    (repo / "images/nvidia-cuda-x86/baselines/freetoken/launch.sh").unlink()
     with pytest.raises(FileNotFoundError, match="launch.sh"):
-        setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
-    assert calls == [] and rendered == []
-    assert not (tmp_path / "run" / "prepared.json").exists()
+        asyncio.run(setup.prepare(config, tmp_path / "run", repo_root=repo))
+    assert not calls and not (tmp_path / "run/prepared.json").exists()
 
 
-def test_small_s_pool_caps_samples_and_interrupted_preparation_can_resume(tmp_path, monkeypatch):
-    config, machine, repo, _, rendered, acquired = _arrange(tmp_path, monkeypatch, ("S-1", "S-N"))
-    load = setup.load_dataset
+def test_official_concurrency_only_constrains_private_batches(tmp_path, monkeypatch):
+    for count in (32, 40):
+        folder = tmp_path / str(count)
+        config, repo, _ = arrange(
+            folder, monkeypatch, workloads=("S-N", "A-N"), private_s_rows=count
+        )
+        config = replace(
+            config,
+            evaluation=replace(config.evaluation, concurrency={"S-N": 32, "A-N": 8}),
+        )
+        if count == 40:
+            with pytest.raises(ValueError, match="S-N/private"):
+                asyncio.run(setup.prepare(config, folder / "run", repo_root=repo))
+            continue
+        result = asyncio.run(setup.prepare(config, folder / "run", repo_root=repo))
+        assert [
+            json.loads(
+                (folder / "run/tasks/search" / task.name / "environment/task.json").read_text()
+            )["evaluation"]["concurrency"]
+            for task in result.task_paths
+        ] == [32, 8]
 
-    def small_pool(source, pool, *, split):
-        rows = load(source, pool, split=split)
-        return rows.select(range(3)) if split == "private" else rows
 
-    monkeypatch.setattr(setup, "load_dataset", small_pool)
-    original = setup.render_task
+def test_interrupted_preparation_reuses_frozen_batches_and_mapped_inputs(tmp_path, monkeypatch):
+    config, repo, calls = arrange(tmp_path, monkeypatch)
+    original = setup.map_inputs
 
-    def interrupt(*args):
-        if rendered:
-            raise InterruptedError("render interrupted")
-        return original(*args)
+    def interrupt(*args, **kwargs):
+        raise InterruptedError("input mapping interrupted")
 
-    monkeypatch.setattr(setup, "render_task", interrupt)
-    with pytest.raises(InterruptedError, match="render interrupted"):
-        setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
-    assert len(rendered) == 1
-    assert (tmp_path / "run" / "image.json").exists()
-    for split in ("private", "calibration", "quality"):
-        assert len(_read(tmp_path / "run" / "input" / "C2" / "S" / split)) == 3
-    assert not (tmp_path / "run" / "prepared.json").exists()
-    retained = tmp_path / "run" / "models" / "C2" / "source" / "retained.json"
-    retained.write_text("{}")
-    monkeypatch.setattr(setup, "render_task", original)
-    result = setup.prepare(config, tmp_path / "run", repo_root=repo, machine=machine)
-    assert len(result.task_paths) == 2 and all(path.is_dir() for path in result.task_paths)
-    assert (tmp_path / "run" / "prepared.json").is_file()
-    assert retained.read_text() == "{}"
+    monkeypatch.setattr(setup, "map_inputs", interrupt)
+    with pytest.raises(InterruptedError):
+        asyncio.run(setup.prepare(config, tmp_path / "run", repo_root=repo))
+    assert not (tmp_path / "run/prepared.json").exists()
+    monkeypatch.setattr(setup, "map_inputs", original)
+    result = asyncio.run(setup.prepare(config, tmp_path / "run", repo_root=repo))
+    observed = list(calls)
+    setup_result = asyncio.run(setup.prepare(config, tmp_path / "run", repo_root=repo))
+    assert calls == observed and setup_result.task_paths == result.task_paths
+    assert (
+        load_from_disk(result.inputs[MODEL]["A-1"]["private"]["source"])[0]["id"] == "A-private-0"
+    )
+
+
+def test_planning_keeps_all_types_unset_until_reference_resolution(tmp_path):
+    repo = tmp_path / "checkout"
+    for category in ("fixture-device", "amd-rocm-x86"):
+        device = repo / "images" / category
+        device.mkdir(parents=True)
+        (device / "Dockerfile").write_text("FROM ubuntu:22.04 AS toolchain\n")
+        for phase in ("search", "coding", "verification"):
+            (device / f"{phase}.Dockerfile").write_text("FROM toolchain\n")
+    for engine in ("llama.cpp", "ollama"):
+        folder = repo / "images/amd-rocm-x86/baselines" / engine
+        folder.mkdir(parents=True)
+        for script in ("install.sh", "launch.sh"):
+            (folder / script).write_text("#!/bin/sh\n")
+
+    def plan(category, folder, **tasks):
+        agent = {"name": "codex", "kwargs": {"reasoning_effort": "xhigh"}}
+        settings = {
+            "environment": {"device_category": category},
+            "tasks": tasks,
+            "search": {"agent": agent},
+            "evaluation": {"agent": agent},
+        }
+        return setup.plan(parse_config(settings, base=tmp_path), tmp_path / folder, repo_root=repo)
+
+    manifest = plan("fixture-device", "all")
+    assert len(manifest["tasks"]) == 35
+    assert all("type" not in task for task in manifest["tasks"])
+    assert manifest["assets"]["MiniMax-M3"] == {
+        "checkpoint": "nvidia/MiniMax-M3-NVFP4",
+        "baselines": {},
+    }
+    mixed = plan("amd-rocm-x86", "mixed", models=["MiniMax-M3", MODEL], workloads=["S-1"])
+    assert [task["model"] for task in mixed["tasks"]] == ["MiniMax-M3", MODEL]
+    assert all("type" not in task for task in mixed["tasks"])
+    assert not (tmp_path / "mixed/image.json").exists()

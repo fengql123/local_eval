@@ -1,0 +1,216 @@
+{
+  "pools": {
+    "A": {
+      "prompt_append": "\nComplete the task yourself without creating sub-agents."
+    },
+    "A-MA": {
+      "prompt_append": "\nThis is a required multi-agent run. Begin by launching two distinct sub-agents with the harness's native delegation tools before implementing the task yourself, even for a small task. Use 2\u20134 sub-agents total. This recording has one local model only. All sub-agents must inherit it; omit model and reasoning_effort arguments when spawning them. Split independent implementation, review or testing work while following the source task's rules. Wait for every sub-agent to finish and incorporate their results before your final response."
+    }
+  },
+  "harnesses": {
+    "claude-code": {
+      "api": "messages",
+      "npm": "@anthropic-ai/claude-code",
+      "version_argv": [
+        "claude",
+        "--version"
+      ],
+      "argv": [
+        "claude",
+        "--disallowed-tools",
+        "{{ disallowed_tools }}",
+        "--safe-mode",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--model",
+        "served",
+        "--dangerously-skip-permissions",
+        "--setting-sources",
+        "",
+        "--no-session-persistence",
+        "--append-system-prompt",
+        "{{ prompt_append }}",
+        "{{ prompt }}"
+      ],
+      "disallowed_tools": "WebSearch,Agent,Task",
+      "env": {
+        "ANTHROPIC_BASE_URL": "{{ url }}",
+        "ANTHROPIC_API_KEY": "local",
+        "ANTHROPIC_AUTH_TOKEN": "local",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "served",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "served",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "served",
+        "CLAUDE_CONFIG_DIR": "{{ config }}",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_FORK_SUBAGENT": "0",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "{{ context_window }}",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "{{ allowance }}",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "delegation": {
+        "tools": [
+          "Agent",
+          "Task"
+        ],
+        "pattern": "agentId[\"\\s]*:[\"\\s]*([A-Za-z0-9_-]+)",
+        "log_result": {
+          "field": "tool_use_result",
+          "status": "completed",
+          "id": "agentId"
+        }
+      },
+      "pools": {
+        "A-MA": {
+          "disallowed_tools": "WebSearch",
+          "env": {
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "4",
+            "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
+          }
+        }
+      }
+    },
+    "codex": {
+      "api": "responses",
+      "npm": "@openai/codex",
+      "version_argv": [
+        "codex",
+        "--version"
+      ],
+      "argv": [
+        "sh",
+        "-c",
+        "prompt=$1; shift; exec \"$@\" < \"$prompt\"",
+        "record-codex",
+        "{{ config }}/prompt.txt",
+        "codex",
+        "exec",
+        "--ignore-rules",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-C",
+        "{{ cwd }}",
+        "-m",
+        "served",
+        "-"
+      ],
+      "env": {
+        "CODEX_HOME": "{{ config }}",
+        "RECORD_API_KEY": "local",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "files": {
+        "config.toml": "codex.config.toml.j2",
+        "prompt.txt": "prompt.txt.j2"
+      },
+      "delegation": {
+        "tools": [
+          "spawn_agent"
+        ],
+        "pattern": "\"agent_id\"\\s*:\\s*\"([^\"\\s]+)\""
+      }
+    },
+    "pi": {
+      "api": "chat",
+      "npm": "@earendil-works/pi-coding-agent",
+      "version_argv": [
+        "pi",
+        "--version"
+      ],
+      "argv": [
+        "pi",
+        "--print",
+        "--mode",
+        "json",
+        "--provider",
+        "record",
+        "--model",
+        "served",
+        "{{ prompt }}"
+      ],
+      "env": {
+        "PI_CODING_AGENT_DIR": "{{ config }}",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "files": {
+        "models.json": "pi.models.json.j2",
+        "settings.json": "pi.settings.json.j2"
+      },
+      "pools": {
+        "A-MA": null
+      }
+    },
+    "hermes": {
+      "api": "chat",
+      "version_argv": [
+        "hermes",
+        "--version"
+      ],
+      "argv": [
+        "hermes",
+        "chat",
+        "--model",
+        "served",
+        "--query",
+        "{{ prompt }}"
+      ],
+      "env": {
+        "HERMES_HOME": "{{ config }}",
+        "TERMINAL_ENV": "local",
+        "OPENAI_BASE_URL": "{{ url }}/v1",
+        "OPENAI_API_KEY": "local"
+      },
+      "files": {
+        "config.yaml": "hermes.config.yaml.j2"
+      },
+      "delegation": {
+        "tools": [
+          "delegate_task"
+        ],
+        "results": true
+      }
+    },
+    "openclaw": {
+      "api": "chat",
+      "version_argv": [
+        "openclaw",
+        "--version"
+      ],
+      "argv": [
+        "openclaw",
+        "agent",
+        "--json",
+        "--session-id",
+        "{{ session }}",
+        "--message",
+        "{{ prompt }}",
+        "--local"
+      ],
+      "env": {
+        "OPENCLAW_STATE_DIR": "{{ config }}",
+        "OPENCLAW_CONFIG_PATH": "{{ config }}/openclaw.json"
+      },
+      "files": {
+        "openclaw.json": "openclaw.json.j2"
+      },
+      "children_file": "children.json",
+      "pools": {
+        "A-MA": {
+          "gateway": true,
+          "argv": [
+            "python3",
+            "{{ config }}/openclaw-multi.py",
+            "{{ prompt }}"
+          ],
+          "files": {
+            "openclaw-multi.py": "openclaw-multi.py.j2"
+          }
+        }
+      }
+    }
+  }
+}

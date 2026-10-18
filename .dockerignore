@@ -12,7 +12,9 @@
 !tables/*.csv
 !tables/*.json
 !templates/
+!templates/**/
 !templates/*.j2
+!templates/**/*.j2
 !templates/*.sh
 !templates/*.md
 !images/
@@ -23,3 +25,17 @@
 !images/*/baselines/*/
 !images/*/baselines/*/install.sh
 !images/*/baselines/*/launch.sh
+!images/*/record/
+!images/*/record/*/
+!images/*/record/*/install.sh
+!images/*/record/*/launch.sh
+# Installed engines are host-side outputs, never image-build inputs.
+**/.venv
+**/.git
+**/src
+**/build
+**/__pycache__
+**/.cache
+
+# Reusable generated input cache.
+storage/

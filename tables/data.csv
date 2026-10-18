@@ -1,0 +1,17 @@
+pool,source,data_source,source_id,num_samples,harnesses,rows,public,private
+S,aime2025,AIME 2025 I+II (under 512 tokens),MathArena/aime_2025,4,,4,0,4
+S,aime2026,AIME 2026 I+II (under 512 tokens),MathArena/aime_2026,7,,7,0,7
+S,wildchat,WildChat-4.8M first user turns (512-8k tokens),allenai/WildChat-4.8M,33,,33,0,33
+S,longbench2,LongBench v2 (8k-32k tokens),zai-org/LongBench-v2,20,,20,0,20
+A,tbench2,Terminal-Bench 2.0 (short tasks),laude-institute/terminal-bench-2,12,"claude-code,codex,pi",36,6,30
+A,hbf,harness-bench-fast (multi-step),ai-forever/harness-bench-fast,10,"claude-code,codex,pi",30,0,30
+A,swebenchv,SWE-bench Verified (shortest <15 min),princeton-nlp/SWE-bench_Verified,4,"claude-code,codex,pi",12,0,12
+A,clawbench,Claw-Bench (L2),claw-bench/claw-bench,9,"openclaw,hermes",18,4,14
+A,automationbench,"AutomationBench (simple, 3-4 tools)",zapier/AutomationBench,8,"openclaw,hermes",16,0,16
+A,agentdojo,AgentDojo (3+ tool calls),ethz-spylab/agentdojo,8,"openclaw,hermes",16,0,16
+A-MA,tbench2,Terminal-Bench 2.0 (short tasks),laude-institute/terminal-bench-2,12,"claude-code,codex",24,4,20
+A-MA,hbf,harness-bench-fast (multi-step),ai-forever/harness-bench-fast,10,"claude-code,codex",20,0,20
+A-MA,swebenchv,SWE-bench Verified (shortest <15 min),princeton-nlp/SWE-bench_Verified,4,"claude-code,codex",8,0,8
+A-MA,clawbench,Claw-Bench (L2),claw-bench/claw-bench,10,"openclaw,hermes",20,4,16
+A-MA,automationbench,"AutomationBench (simple, 3-4 tools)",zapier/AutomationBench,8,"openclaw,hermes",16,0,16
+A-MA,agentdojo,AgentDojo (3+ tool calls),ethz-spylab/agentdojo,8,"openclaw,hermes",16,0,16

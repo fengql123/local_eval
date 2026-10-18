@@ -1,405 +1,393 @@
-"""Native three-task rendering: two common and two edge cases, without image builds."""
+"""Native three-job generation: two normal cases and two source boundaries."""
 
+import hashlib
 import json
-import os
-import shutil
+import re
 import subprocess
 import tomllib
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
 from harbor.models.task.config import TaskConfig
 from harbor.models.task.task import Task as HarborTask
 
-from eval.config import AgentConfig, EvaluationConfig, RunConfig, SearchConfig, Task
-from eval.device import GPU, Machine
-from eval.tasks import render_task, select_image
+from eval.config import (
+    AgentConfig,
+    EnvironmentConfig,
+    EvaluationConfig,
+    RunConfig,
+    SearchConfig,
+    Task,
+)
+from eval.tasks import freeze_image, render_task, select_image
 
 
-def _fixture(tmp_path):
-    """Small authored-source stand-ins are only used for selector/renderer tests."""
+def fixture(tmp_path):
     root = tmp_path / "checkout"
-    dockerfile = root / "images/nvidia-cuda-x86/Dockerfile"
-    installer = dockerfile.parent / "baselines/freetoken/install.sh"
-    installer.parent.mkdir(parents=True)
-    dockerfile.write_text("# Test-only supplied image; never built.\nFROM scratch\n")
-    installer.write_text("#!/bin/sh\n# Test-only supplied installer; never executed.\n")
-    installer.with_name("launch.sh").write_text(
-        "#!/bin/sh\n# Test-only supplied launcher; never executed.\n"
-    )
-    shutil.copy(Path(__file__).parents[1] / "images/prepare.sh", root / "images/prepare.sh")
-    shutil.copy(Path(__file__).parents[1] / ".dockerignore", root / ".dockerignore")
+    device = root / "images/nvidia-cuda-x86"
+    device.mkdir(parents=True)
+    (device / "Dockerfile").write_text("FROM ubuntu:22.04 AS toolchain\n")
+    for phase in ("search", "coding", "verification"):
+        (device / f"{phase}.Dockerfile").write_text("FROM toolchain\n")
+    for baseline in ("freetoken", "ollama"):
+        folder = device / "baselines" / baseline
+        folder.mkdir(parents=True)
+        for name in ("install.sh", "launch.sh"):
+            (folder / name).write_text("#!/bin/sh\n")
+    (device / "baselines/freetoken/sequential-read.patch").write_text("fixture patch\n")
     (root / "eval").mkdir()
-    (root / "eval/__init__.py").write_text('"""Test-only evaluator source."""\n')
-    run = tmp_path / "runs" / "fixture-id"
-    inputs = {}
-    for key in ("public", "public_s", "private", "calibration", "quality"):
-        directory = run / "inputs" / key
-        directory.mkdir(parents=True)
-        inputs[key] = str(directory)
-    models = run / "models/C2"
-    source = models / "source"
-    source.mkdir(parents=True)
-    baseline = models / "baselines/freetoken"
-    baseline.mkdir(parents=True)
+    (root / "eval/__init__.py").write_text("")
+    (root / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0.1'\n")
+    run = tmp_path / "runs/fixture-id"
+    inputs = {
+        name: {"source": str(tmp_path / "dataset" / name)}
+        for name in ("public", "private", "quality")
+    }
     assets = {
-        "root": str(models),
-        "source": {
-            "source": "Qwen/Qwen3.6-35B-A3B",
-            "path": str(source),
-            "checkpoint": str(source),
-        },
+        "checkpoint": "nvidia/Qwen3.6-35B-A3B-NVFP4",
         "baselines": {
-            "freetoken": {
-                "path": str(baseline),
-                "source": "example/model",
-                "checkpoint": str(baseline),
-            }
+            "freetoken": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+            "ollama": "qwen:fixture",
         },
     }
-    machine = Machine("Linux", "x86_64", 8, 16 * 2**30, (GPU(2, "GPU-fixture", "fixture", 8192),))
-    engines = ("freetoken", "ollama")
-    other_installer = root / "images" / machine.category / "baselines" / engines[1] / "install.sh"
-    other_installer.parent.mkdir(parents=True)
-    other_installer.write_text("#!/bin/sh\n# Test-only supplied installer; never executed.\n")
-    other_installer.with_name("launch.sh").write_text(
-        "#!/bin/sh\n# Test-only supplied launcher; never executed.\n"
-    )
-    return root, machine, engines, run, inputs, assets
+    return root, run, inputs, assets
 
 
-def _task_config(folder):
-    return TaskConfig.model_validate(tomllib.loads((folder / "task.toml").read_text()))
+def embedded_python(script):
+    """The Python program an oracle script feeds to the interpreter."""
+    return script.read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
 
-def _compose(folder):
-    result = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            str(folder / "environment/docker-compose.yaml"),
-            "config",
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={**os.environ, "MAIN_IMAGE_NAME": "hb__fixture"},
+def read(folder):
+    return (
+        HarborTask(folder),
+        TaskConfig.model_validate(tomllib.loads((folder / "task.toml").read_text())),
+        json.loads((folder / "environment/runtime.json").read_text()),
     )
-    return json.loads(result.stdout)["services"]["main"]
 
 
-def test_native_three_tasks_scope_agents_data_and_immutable_weight_mounts(tmp_path):
-    root, machine, engines, run, inputs, assets = _fixture(tmp_path)
-    image = select_image(root, machine, engines)
-    coding = render_task(
-        Task("example_S-1", "Qwen3.6-35B-A3B", "S-1", "SOTA"),
-        RunConfig(
-            agent=AgentConfig("codex", "fixture-model", budget_seconds=2700),
-            search=SearchConfig("single", AgentConfig("claude-code", budget_seconds=1800)),
-            evaluation=EvaluationConfig(agent=AgentConfig("claude-code", budget_seconds=900)),
-        ),
-        machine,
-        image,
-        run,
-        inputs,
-        assets,
+def test_local_tasks_use_phase_images_users_and_exact_dataset_scopes(tmp_path):
+    root, run, inputs, assets = fixture(tmp_path)
+    image = freeze_image(select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"])), run)
+    config = RunConfig(environment=EnvironmentConfig(kwargs={"gpu_ids": [0, "GPU-example"]}))
+    render_task(
+        Task("example_A-1", "Qwen3.6-35B-A3B", "A-1", "SOTA"), config, image, run, inputs, assets
     )
-    search, verification = (run / phase / coding.name for phase in ("search", "verification"))
-    assert coding.parent == run / "coding"
-    search_config, coding_config, verification_config = map(
-        _task_config, (search, coding, verification)
-    )
-    for folder, config in ((search, search_config), (coding, coding_config)):
-        assert config.schema_version == "1.4" and not config.steps
-        assert config.verifier.user == "root" and config.verifier.environment_mode == "shared"
-        native = HarborTask(folder)
-        assert not native.has_steps and native.paths.instruction_path.is_file()
-        assert native.paths.test_path_for(config.environment.os).is_file()
-        solution = folder / "solution/solve.sh"
-        assert solution.stat().st_mode & 0o111
-        subprocess.run(["bash", "-n", str(solution)], check=True)
-    assert (search_config.agent.user, search_config.agent.timeout_sec) == ("search", 1800)
-    assert (coding_config.agent.user, coding_config.agent.timeout_sec) == ("agent", 2700)
-    assert search_config.environment.workdir == "/home/search"
-    assert coding_config.environment.workdir == "/workspace"
-    assert search_config.environment.docker_image is None
-    assert coding_config.environment.docker_image == image.tag
-    assert search_config.artifacts == ["/root/eval/reference"]
-    assert coding_config.artifacts == ["/workspace/submission"]
-    assert len(coding_config.verifier.collect) == len(search_config.verifier.collect) == 1
-    assert search_config.verifier.collect[0].command.endswith("--stage collect")
-    assert search_config.verifier.collect[0].user == "root"
-    assert coding_config.verifier.collect[0].command.endswith("--collect-submission")
-    assert coding_config.verifier.collect[0].user == "root"
-    prepare, review, measure = verification_config.steps
-    assert [step.name for step in verification_config.steps] == ["prepare", "review", "measure"]
-    assert [step.verifier.user for step in verification_config.steps] == ["root", "judge", "root"]
-    assert all(step.verifier.environment_mode == "shared" for step in verification_config.steps)
-    assert prepare.min_reward == review.min_reward == 1 and measure.min_reward is None
-    assert review.verifier.timeout_sec == 1020
-    assert verification_config.multi_step_reward_strategy == "final"
-    assert verification_config.environment.docker_image == image.tag
-    assert HarborTask(verification).has_steps
-    assert (verification / "steps/prepare/workdir").is_dir()
-    assert not (verification / "steps/prepare/workdir/submission").exists()
-    services = {
-        phase: _compose(run / phase / coding.name) for phase in ("search", "coding", "verification")
-    }
-    assert all(service["image"] == image.tag for service in services.values())
-    assert services["search"]["build"]["context"] == str(root)
-    assert services["search"]["build"]["tags"] == ["hb__fixture"]
-    assert "build" not in services["coding"] and "build" not in services["verification"]
-    assert all(service["deploy"] == services["search"]["deploy"] for service in services.values())
-    assert services["verification"]["security_opt"] == ["no-new-privileges:true"]
-    assert "security_opt" not in services["search"] and "security_opt" not in services["coding"]
-    mounted = {
-        phase: {item["target"]: item for item in service["volumes"]}
-        for phase, service in services.items()
-    }
-    assert set(mounted["search"]) == {
-        "/models/source",
-        "/models/baselines/freetoken",
-        "/home/search/data/S",
-        "/root/eval/task.json",
-        "/root/eval/reference",
-        "/opt/eval/start.sh",
-    }
-    assert not mounted["search"]["/root/eval/reference"].get("read_only", False)
-    assert all(
-        item["read_only"]
-        for target, item in mounted["search"].items()
-        if target != "/root/eval/reference"
-    )
-    assert set(mounted["coding"]) == {
-        "/models/source",
-        "/models/reference",
-        "/workspace/data/S",
-        "/workspace/reference.json",
-        "/root/eval/task.json",
-        "/root/eval/reference",
-        "/workspace/run.md",
-        "/opt/eval/start.sh",
-    }
-    assert set(mounted["verification"]) == {
-        "/models/source",
-        "/models/reference",
-        "/root/eval/private",
-        "/root/eval/quality",
-        "/root/eval/task.json",
-        "/root/eval/reference",
-        "/opt/eval/start.sh",
-    }
-    assert all(
-        item["read_only"]
-        for phase in ("coding", "verification")
-        for item in mounted[phase].values()
-    )
-    selected_weights = coding / "reference/weights"
-    assert not selected_weights.exists()
-    assert mounted["coding"]["/models/reference"]["source"] == str(selected_weights)
-    assert mounted["verification"]["/models/reference"]["source"] == str(selected_weights)
-    for folder in (search, coding):
-        assert (folder / "reference/metadata").stat().st_mode & 0o777 == 0o700
-    assert json.loads((coding / "reference/metadata/public.json").read_text()) == {}
-    metadata = json.loads((coding / "environment/task.json").read_text())
-    assert metadata["agent"]["model"] == "fixture-model"
-    assert metadata["assets"]["source"]["checkpoint"] == "/models/source"
-    assert (
-        metadata["assets"]["baselines"]["freetoken"]["checkpoint"] == "/models/baselines/freetoken"
-    )
-    assert "storage" not in metadata and "user" not in metadata["candidate"]
-    instructions = (search / "instruction.md").read_text()
-    assert "selection.json" in instructions and '"args": []' in instructions
-    assert "read-only" in instructions and "new coding" in instructions
-    assert "Path('selection.json')" in (search / "solution/solve.sh").read_text()
-    assert "result['baseline']" in (search / "solution/solve.sh").read_text()
-
-
-def test_shared_image_handles_source_equal_and_native_assets_with_review_only_credentials(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-api-secret")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fixture-oauth-secret")
-    monkeypatch.setenv("CODEX_AUTH_JSON", '{"test_only":"fixture-codex-secret"}')
-    monkeypatch.setenv("REWARDKIT_FORCE_SUBSCRIPTION", "1")
-    root, machine, engines, run, inputs, assets = _fixture(tmp_path)
-    assets["baselines"]["freetoken"] = dict(assets["source"])
-    assets["baselines"]["ollama"] = {
-        "source": "qwen:fixture",
-        "path": None,
-        "checkpoint": "qwen:fixture",
-    }
-    image = select_image(root, machine, engines)
-    expected = (
-        (AgentConfig("claude-code", auth="api_key"), {"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}),
-        (AgentConfig("claude-code"), {"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"}),
-        (
-            AgentConfig("codex"),
-            {
-                "CODEX_AUTH_JSON": "${CODEX_AUTH_JSON}",
-                "REWARDKIT_FORCE_SUBSCRIPTION": "${REWARDKIT_FORCE_SUBSCRIPTION}",
-            },
-        ),
-    )
-    role_env = {
-        "HOME": "/home/judge",
-        "USER": "judge",
-        "LOGNAME": "judge",
-        "TMPDIR": "/home/judge/tmp",
-        "XDG_CACHE_HOME": "/home/judge/.cache",
-    }
-    for index, (reviewer, credentials) in enumerate(expected):
-        coding = render_task(
-            Task(f"example_{index}", "Qwen3.6-35B-A3B", "A-N", "SOTA"),
-            RunConfig(evaluation=EvaluationConfig(agent=reviewer)),
-            replace(machine, gpus=()),
-            image,
-            run,
-            inputs,
-            assets,
-        )
-        verification = run / "verification" / coding.name
-        task = _task_config(verification)
-        assert task.steps[1].verifier.env == {**role_env, **credentials}
-        assert task.steps[0].verifier.env == task.steps[2].verifier.env == {}
-        metadata = json.loads((coding / "environment/task.json").read_text())
-        assert metadata["assets"]["baselines"]["freetoken"]["checkpoint"] == "/models/source"
-        assert metadata["assets"]["baselines"]["ollama"]["checkpoint"] == "qwen:fixture"
-        assert metadata["evaluation"]["agent"]["model"] is None
-        for phase in ("search", "coding", "verification"):
-            folder = run / phase / coding.name
-            service = yaml.safe_load((folder / "environment/docker-compose.yaml").read_text())[
-                "services"
-            ]["main"]
-            assert (
-                service["image"] == image.tag
-                and "deploy" not in service
-                and "environment" not in service
-            )
-            if phase == "search":
-                assert not any(
-                    item["target"].startswith("/models/baselines") for item in service["volumes"]
-                )
-            elif phase == "coding":
-                assert {"/workspace/data/A", "/workspace/data/S"} <= {
-                    item["target"] for item in service["volumes"]
-                }
-            if phase != "verification":
-                assert _task_config(folder).verifier.env == {}
-            for file in folder.rglob("*"):
-                if file.is_file():
-                    assert not any(
-                        secret in file.read_text()
-                        for secret in (
-                            "fixture-api-secret",
-                            "fixture-oauth-secret",
-                            "fixture-codex-secret",
-                        )
-                    )
-    assert image.build_args == {"BASELINES": "freetoken ollama"}
-    (root / ".env").write_text("PRIVATE_SECRET=excluded\n")
-    (root / "runs").mkdir()
-    (root / "runs/private.json").write_text('{"answer":"private"}')
-    assert select_image(root, machine, engines).identity == image.identity
-    assert "images/prepare.sh" in image.manifest["sources"]
-    (root / "images/prepare.sh").write_text("#!/bin/bash\n# Changed trusted preparation.\n")
-    assert select_image(root, machine, engines).identity != image.identity
-
-
-def test_missing_image_assets_fail_before_rendering_and_login_files_are_never_read(
-    tmp_path, monkeypatch
-):
-    root, machine, engines, run, inputs, assets = _fixture(tmp_path)
-    for relative in (
-        machine.dockerfile,
-        Path("images/prepare.sh"),
-        Path("images") / machine.category / "baselines/freetoken/install.sh",
-        Path("images") / machine.category / "baselines/freetoken/launch.sh",
-    ):
-        path = root / relative
-        contents = path.read_bytes()
-        path.unlink()
-        with pytest.raises(FileNotFoundError, match=str(relative)):
-            select_image(root, machine, engines)
-        path.write_bytes(contents)
-    assert not any((run / phase).exists() for phase in ("search", "coding", "verification"))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "missing-login"))
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    coding = render_task(
-        Task("missing-login_S-1", "Qwen3.6-35B-A3B", "S-1", "SOTA"),
-        RunConfig(),
-        machine,
-        select_image(root, machine, engines),
-        run,
-        inputs,
-        assets,
-    )
-    review = _task_config(run / "verification" / coding.name).steps[1]
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in review.verifier.env
-    assert not (tmp_path / "missing-login").exists() and not (run / "judge-auth.json").exists()
-
-
-def test_readiness_and_all_native_hooks_use_the_protected_interpreter(tmp_path):
-    root, machine, engines, run, inputs, assets = _fixture(tmp_path)
-    coding = render_task(
-        Task("fixture_S-1", "Qwen3.6-35B-A3B", "S-1", "SOTA"),
-        RunConfig(),
-        machine,
-        select_image(root, machine, engines),
-        run,
-        inputs,
-        assets,
-    )
-    commands = tmp_path / "commands"
-    commands.mkdir()
-    events, ready = tmp_path / "events", tmp_path / "ready"
-    (commands / "python").write_text("#!/bin/sh\nexit 99\n")
-    evaluator = commands / "evaluator-python"
-    evaluator.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$EVENTS"\n')
-    (commands / "sleep").write_text('#!/bin/sh\nprintf "keepalive\\n" >> "$EVENTS"\n')
-    (commands / "touch").write_text(
-        '#!/bin/sh\n[ "${EXIT_CODE:-0}" = 0 ] || exit "$EXIT_CODE"\nexec /usr/bin/touch "$@"\n'
-    )
-    for command in commands.iterdir():
-        command.chmod(0o755)
-    env = {
-        **os.environ,
-        "PATH": f"{commands}:{os.environ['PATH']}",
-        "EVENTS": str(events),
-        "EXIT_CODE": "17",
-    }
-    startup = (coding / "environment/start.sh").read_text().replace("/run/eval-ready", str(ready))
-    assert "python" not in startup and "eval.search" not in startup
-    ready.touch()
-    assert subprocess.run(["bash", "-c", startup], env=env).returncode == 17
-    assert not ready.exists()
-    env["EXIT_CODE"] = "0"
-    subprocess.run(["bash", "-c", startup], env=env, check=True)
-    verification = run / "verification" / coding.name
-    hooks = [run / "search" / coding.name / "tests/test.sh", coding / "tests/test.sh"]
-    hooks.extend(
-        verification / "steps" / stage / "tests/test.sh"
-        for stage in ("prepare", "review", "measure")
-    )
-    for hook in hooks:
-        subprocess.run(["bash", "-n", str(hook)], check=True)
-        script = hook.read_text()
-        assert "exec /opt/eval/.venv/bin/python -I -m " in script
-        subprocess.run(
-            ["bash", "-c", script.replace("/opt/eval/.venv/bin/python", str(evaluator))],
-            env=env,
-            check=True,
-        )
-    assert events.read_text().splitlines() == [
-        "keepalive",
-        "-I -m eval.search.run --task /root/eval/task.json --stage gate",
-        "-I -m eval.verify.run --stage handoff --task /root/eval/task.json",
-        "-I -m eval.verify.run --stage prepare --task /root/eval/task.json",
-        "-I -m eval.verify.run --stage review",
-        "-I -m eval.verify.run --stage measure --task /root/eval/task.json",
+    records = [
+        read(run / "tasks" / folder / "example_A-1") for folder in ("search", "agent", "evaluation")
     ]
+    for phase, folder, (_native, parsed, runtime) in zip(
+        ("search", "coding", "verification"),
+        ("search", "agent", "evaluation"),
+        records,
+        strict=True,
+    ):
+        assert parsed.environment.docker_image is None
+        assert (
+            run / "tasks" / folder / "example_A-1/environment/Dockerfile"
+        ).read_text() == image.manifest["images"][phase]["source"]
+        assert runtime["gpu_ids"] == ["0", "GPU-example"]
+        assert runtime["image"]["identity"] == image.manifest["images"][phase]["identity"]
+        assert all(item["read_only"] for item in runtime["files"])
+        assert not (run / "tasks" / folder / "example_A-1/environment/docker-compose.yaml").exists()
+        for script in (run / "tasks" / folder / "example_A-1").rglob("*.sh"):
+            subprocess.run(["bash", "-n", str(script)], check=True)
+            for program in re.findall(r"<<'PY'\n(.*?)\nPY", script.read_text(), re.S):
+                compile(program, str(script), "exec")
+    search_folder = run / "tasks/search/example_A-1"
+    for path in (search_folder / "instruction.md", search_folder / "solution/solve.sh"):
+        assert "/var/lib/local-eval/private" in path.read_text()
+    for oracle in (run / "tasks").glob("*/example_A-1/solution/solve.sh"):
+        compile(embedded_python(oracle), str(oracle), "exec")
+    for stage in ("search", "agent"):
+        text = (run / "tasks" / stage / "example_A-1/instruction.md").read_text()
+        assert "completion_mean" not in text and "TTFT" in text
+    assert not (run / "tasks/agent/example_A-1/environment/run.md").exists()
+    prompt = (run / "tasks/agent/example_A-1/instruction.md").read_text()
+    assert "Build the best possible inference server on this machine." in prompt
+    assert "/workspace/server.launch /models/target" in prompt
+    assert "Time budget" not in prompt and "drafter" not in prompt
+    assert "/workspace/output/submission/" in prompt and "/workspace/runtime/candidate/" in prompt
+    assert "recovery" not in prompt.lower() and "--resume" not in prompt
+    search, coding, verification = [record[1] for record in records]
+    assert search.agent.user == "search" and coding.agent.user == "agent"
+    assert search.verifier.user == search.verifier.collect[0].user == "root"
+    assert coding.verifier.user == coding.verifier.collect[0].user == "root"
+    for stage in ("search", "agent"):
+        assert (run / "tasks" / stage / "example_A-1/tests").stat().st_mode & 0o777 == 0o700
+    assert [step.name for step in verification.steps] == [
+        "prepare",
+        "review",
+        "quality",
+        "reference-prepare",
+        "reference",
+        "measure",
+    ]
+    assert [step.verifier.user for step in verification.steps] == [
+        "root",
+        "judge",
+        "root",
+        "root",
+        "root",
+        "root",
+    ]
+    assert all(step.min_reward == 1 for step in verification.steps[:5])
+    assert verification.steps[3].verifier.network_mode is None
+    assert all(
+        verification.steps[index].verifier.network_mode.value == "no-network" for index in (2, 4, 5)
+    )
+    assert verification.steps[2].verifier.timeout_sec == (
+        config.evaluation.quality_timeout_seconds + config.evaluation.health_timeout_seconds + 120
+    )
+    assert "CLAUDE_CODE_EFFORT_LEVEL" not in verification.steps[1].verifier.env
+    scopes = [{item["target"] for item in record[2]["files"]} for record in records]
+    assert scopes[0] == {
+        "/var/lib/local-eval/task.json",
+        "/var/lib/local-eval/private",
+    }
+    assert scopes[2] == {
+        "/var/lib/local-eval/task.json",
+        "/var/lib/local-eval/private",
+        "/var/lib/local-eval/quality",
+    }
+    assert scopes[1] == {"/var/lib/local-eval/task.json", "/inputs/public"}
+    assert not any("/workspace/data/S" in scope for scope in scopes)
+
+    for workload in ("S-N", "A-N"):
+        name = f"example_{workload}"
+        render_task(
+            Task(name, "Qwen3.6-35B-A3B", workload, "SOTA"), config, image, run, inputs, assets
+        )
+        prompt = (run / "tasks/agent" / name / "instruction.md").read_text()
+        assert "serving throughput" in prompt and "including prefill" in prompt
+        assert "completion_mean" not in prompt
+        prompt = (run / "tasks/search" / name / "instruction.md").read_text()
+        assert "Maximize serving throughput" in prompt and "ttft_mean" not in prompt
+        prompt = (run / "tasks/agent" / name / "instruction.md").read_text()
+        assert "Official verification uses **N=" in prompt
+
+
+def test_cloud_source_builds_and_reviewer_credentials_are_native_placeholders(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "private-fixture-token")
+    root, run, inputs, assets = fixture(tmp_path)
+    image = freeze_image(select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"])), run)
+    config = RunConfig(
+        environment=EnvironmentConfig(
+            provider="daytona", kwargs={"gpus": 1, "gpu_types": ["RTX-4090"], "spot": True}
+        ),
+        evaluation=EvaluationConfig(
+            agent=AgentConfig("claude-code", kwargs={"reasoning_effort": "xhigh"})
+        ),
+    )
+    render_task(
+        Task("example_A-MA", "Qwen3.6-35B-A3B", "A-MA", "SOTA"), config, image, run, inputs, assets
+    )
+    folder = run / "tasks/evaluation/example_A-MA"
+    _, native, runtime = read(folder)
+    assert not (folder / "steps/prepare/workdir").exists()
+    assert native.environment.gpus == 1 and native.environment.gpu_types == ["RTX-4090"]
+    assert native.environment.docker_image is None
+    assert native.steps[1].verifier.env["CLAUDE_CODE_EFFORT_LEVEL"] == "xhigh"
+    assert all(
+        "CLAUDE_CODE_EFFORT_LEVEL" not in step.verifier.env
+        for step in (native.steps[0], *native.steps[2:])
+    )
+    assert runtime["gpu_ids"] == [] and runtime["payload"]["identity"]
+    assert "storage" not in runtime and "assets" not in runtime
+    contents = (folder / "task.toml").read_text()
+    assert "${CLAUDE_CODE_OAUTH_TOKEN}" in contents and "private-fixture-token" not in contents
+    assert not (run / "build-context").exists()
+    for phase, name in (("search", "search"), ("coding", "agent"), ("verification", "evaluation")):
+        environment = run / "tasks" / name / "example_A-MA/environment"
+        assert (environment / "Dockerfile").read_text() == image.manifest["images"][phase]["source"]
+        setup = (environment / "setup.sh").read_text()
+        assert "uv sync --locked" in setup and "-m eval.models" in setup
+        assert "eval.providers.bootstrap" not in setup
+    payload = Path(image.manifest["payload"]["source"])
+    assert not (payload / "images").exists() and not (payload / "templates").exists()
+    assert (payload / "baselines/nvidia-cuda-x86/freetoken/install.sh").exists()
+    patch = "baselines/nvidia-cuda-x86/freetoken/sequential-read.patch"
+    assert (payload / patch).read_text() == "fixture patch\n"
+    assert (
+        image.manifest["payload"]["hashes"][patch] == hashlib.sha256(b"fixture patch\n").hexdigest()
+    )
+    assert not (payload / ".venv").exists()
+
+
+def test_recipe_changes_invalidate_payload_without_rebuilding_generic_image(tmp_path):
+    root, _, _, assets = fixture(tmp_path)
+    first = select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"]))
+    (root / "images/nvidia-cuda-x86/baselines/freetoken/install.sh").write_text(
+        "#!/bin/sh\necho changed\n"
+    )
+    second = select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"]))
+    assert first.identity == second.identity
+    assert first.manifest["payload"]["identity"] != second.manifest["payload"]["identity"]
+
+
+def test_missing_authored_phase_or_launcher_stops_source_planning(tmp_path):
+    root, _, _, assets = fixture(tmp_path)
+    phase = root / "images/nvidia-cuda-x86/search.Dockerfile"
+    text = phase.read_text()
+    phase.unlink()
+    with pytest.raises(FileNotFoundError, match="search.Dockerfile"):
+        select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"]))
+    phase.write_text(text)
+    (root / "images/nvidia-cuda-x86/baselines/freetoken/launch.sh").unlink()
+    with pytest.raises(FileNotFoundError, match="launch.sh"):
+        select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"]))
+
+
+def test_search_prompt_states_support_objective_resources_and_handoff(tmp_path):
+    root, run, inputs, assets = fixture(tmp_path)
+    image = freeze_image(select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"])), run)
+    config = RunConfig(
+        search=SearchConfig(agent=AgentConfig("claude-code", budget_seconds=5400)),
+        environment=EnvironmentConfig(
+            provider="daytona", kwargs={"gpus": 2, "gpu_types": ["RTX-PRO-6000"]}
+        ),
+    )
+    for workload, objective in (("S-1", "with equal weight"), ("S-N", "**N=32**")):
+        name = f"example_{workload}"
+        render_task(
+            Task(name, "Qwen3.6-35B-A3B", workload, "SOTA"), config, image, run, inputs, assets
+        )
+        prompt = (run / "tasks/search" / name / "instruction.md").read_text()
+        assert prompt.split("\n\n")[1].startswith(
+            "Before anything else, comprehensively and rigorously"
+        )
+        assert "2 GPUs" in prompt and "RTX-PRO-6000" in prompt
+        assert objective in prompt and "/var/lib/local-eval/private" in prompt
+        assert "Choose your own search method" in " ".join(prompt.split())
+        assert "Full replay is mandatory only during verification" in prompt
+        assert '"supported": false' in prompt and "freetoken" in prompt and "ollama" in prompt
+        assert "nvidia/Qwen3.6-35B-A3B-NVFP4" in prompt and "qwen:fixture" in prompt
+        assert (
+            "/workspace/output/selection.json" in prompt
+            and "Transient infrastructure failures" in prompt
+        )
+
+
+def test_slo_tasks_render_without_search_reference_or_reference_timing(tmp_path):
+    root, run, inputs, assets = fixture(tmp_path)
+    image = freeze_image(select_image(root, "nvidia-cuda-x86", ()), run)
+    config = RunConfig()
+    static = {
+        "checkpoint": "nvidia/MiniMax-M3-NVFP4",
+        "baselines": {},
+    }
+    task = Task("static_S-1", "MiniMax-M3", "S-1", "SLO")
+    render_task(task, config, image, run, inputs, static)
+    assert not (run / "tasks/search/static_S-1").exists()
+    coding = run / "tasks/agent/static_S-1"
+    prompt = (coding / "instruction.md").read_text()
+    assert "reference.json" not in prompt and "--mode slo" in prompt
+    assert "/opt/eval/tables/slo.json" in prompt
+    assert "Four tiers" in prompt and "0–100" in prompt
+    assert "sqrt(min(1, tier_TTFT / mean_TTFT)" in prompt
+    assert "Incomplete and unstarted units earn zero" in prompt
+    assert not (coding / "environment/run.md").exists()
+    # Every SLO task targets FreeToken's checkpoint; tokenizer files come from the source.
+    target = {"source": "nvidia/MiniMax-M3-NVFP4"}
+    for folder in (coding, run / "tasks/evaluation/static_S-1"):
+        metadata = json.loads((folder / "environment/task.json").read_text())
+        assert metadata["type"] == "SLO" and metadata["target"] == target
+        assert metadata["reference"] is None
+        assert json.loads((folder / "environment/runtime.json").read_text())["target"] == target
+    oracle = coding / "solution/solve.sh"
+    compile(embedded_python(oracle), str(oracle), "exec")
+    assert "'baseline': None" in oracle.read_text()
+    _, verification, _ = read(run / "tasks/evaluation/static_S-1")
+    assert [step.name for step in verification.steps] == ["prepare", "review", "quality", "slo"]
+    assert verification.steps[3].min_reward is None
+    assert verification.steps[3].verifier.network_mode.value == "no-network"
+    for script in (run / "tasks").rglob("static_S-1/**/*.sh"):
+        subprocess.run(["bash", "-n", str(script)], check=True)
+
+    # An unsupported search verdict re-renders a searched pair as SLO.
+    task = Task("searched_A-N", "Qwen3.6-35B-A3B", "A-N", "SOTA")
+    render_task(task, config, image, run, inputs, assets)
+    allocation = {"gpus": 1, "cpu_prefixes": ["AMD EPYC 9355"]}
+    for phase in ("agent", "evaluation"):
+        runtime_path = run / "tasks" / phase / task.task_id / "environment/runtime.json"
+        runtime = json.loads(runtime_path.read_text())
+        runtime["allocation_check"] = allocation
+        runtime_path.write_text(json.dumps(runtime))
+    render_task(replace(task, type="SLO"), config, image, run, inputs, assets)
+    for phase in ("agent", "evaluation"):
+        runtime_path = run / "tasks" / phase / task.task_id / "environment/runtime.json"
+        runtime = json.loads(runtime_path.read_text())
+        assert runtime["allocation_check"] == allocation
+        assert runtime["payload"] == image.manifest["payload"]
+    evaluation = run / "tasks/evaluation/searched_A-N"
+    assert sorted(path.name for path in (evaluation / "steps").iterdir()) == [
+        "prepare",
+        "quality",
+        "review",
+        "slo",
+    ]
+    metadata = json.loads((evaluation / "environment/task.json").read_text())
+    assert metadata["target"] == {
+        "source": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+    }
+    prompt = (run / "tasks/agent/searched_A-N/instruction.md").read_text()
+    assert (
+        "min(1, throughput / tier_throughput)" in prompt
+        and "Official verification uses **N=" in prompt
+    )
+    oracle = run / "tasks/agent/searched_A-N/solution/solve.sh"
+    assert "'baseline': \"freetoken\"" in oracle.read_text()
+    compile(embedded_python(oracle), str(oracle), "exec")
+
+
+def test_sandbox_payload_leaves_out_host_only_recording_files(tmp_path):
+    root, _, _, _ = fixture(tmp_path)
+    for name in ("tables/data.csv", "tables/request_fields.json", "eval/bench/sources.py"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("fixture\n")
+    targets = select_image(root, "nvidia-cuda-x86", ()).manifest["payload"]["sources"]
+    assert "tables/request_fields.json" in targets and "eval/__init__.py" in targets
+    assert "tables/data.csv" not in targets and "eval/bench/sources.py" not in targets
+
+
+def test_gguf_reference_does_not_change_canonical_candidate_or_oracle(tmp_path):
+    from eval import run as runner
+
+    root, run, inputs, assets = fixture(tmp_path)
+    assets["baselines"]["ollama"] = "owner/model-GGUF"
+    image = freeze_image(select_image(root, "nvidia-cuda-x86", tuple(assets["baselines"])), run)
+    task = Task("fixed_A-N", "Qwen3.6-35B-A3B", "A-N", "SOTA")
+    path = render_task(task, RunConfig(), image, run, inputs, assets)
+    supplied = tmp_path / "references"
+    supplied.mkdir()
+    (supplied / f"{task.task_id}.json").write_text(
+        json.dumps({"baseline": "ollama", "args": [], "env": {}})
+    )
+    (run / "prepared.json").write_text(
+        json.dumps(
+            {
+                "schema": 8,
+                "tasks": [{"task_id": task.task_id, "model": task.model}],
+                "assets": {task.model: assets},
+            }
+        )
+    )
+    assert runner._coding_tasks(run, (path,), reference=supplied) == (path,)
+    for phase in ("agent", "evaluation"):
+        folder = run / "tasks" / phase / task.task_id
+        metadata = json.loads((folder / "environment/task.json").read_text())
+        runtime = json.loads((folder / "environment/runtime.json").read_text())
+        assert metadata["target"] == runtime["target"] == {"source": assets["checkpoint"]}
+        assert metadata["assets"]["baselines"]["ollama"] == "owner/model-GGUF"
+    from eval.verify.run import reference_checkpoint
+
+    assert (
+        reference_checkpoint(metadata, {"baseline": "ollama"})
+        == "/workspace/runtime/reference/weights/target"
+    )
+    assert reference_checkpoint(metadata, {"baseline": "freetoken"}) == "/models/target"
+    oracle = (path / "solution/solve.sh").read_text()
+    assert "'baseline': \"freetoken\"" in oracle

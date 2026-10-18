@@ -1,40 +1,45 @@
-"""Two completed/gated evaluations and two failed timed server evaluations."""
+"""Two complete verification procedures and two failed gate/transport cases."""
 
 import asyncio
 import json
-import os
 import subprocess
-import sys
-import tomllib
-from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from datasets import Dataset
 from http_server import event, headers, server
 
 from eval.bench.serve import Server, StartupError
 from eval.launch import ENDPOINT
 from eval.request_policy import request_fields
+from eval.verify import access
 from eval.verify import run as verifier
-from eval.verify.run import Backend, _backend, evaluate, rewards
+from eval.verify.run import Backend, evaluate, install_reference, pre_run, rewards
 
-TASK = {"model": "C2", "workload": "S-1"}
-PREPARATION_TASK = {
-    **TASK,
-    "assets": {"source": {"checkpoint": "/models/source"}},
+TASK = {
+    "model": "Qwen3.6-35B-A3B",
+    "workload": "S-1",
+    "device_category": "nvidia-cuda-x86",
+    "assets": {
+        "checkpoint": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+        "baselines": {"freetoken": "nvidia/Qwen3.6-35B-A3B-NVFP4"},
+    },
+    "target": {"source": "nvidia/Qwen3.6-35B-A3B-NVFP4"},
     "evaluation": {
         "install_timeout_seconds": 5,
-        "agent": {"name": "claude-code", "auth": "login", "budget_seconds": 30, "kwargs": {}},
+        "health_timeout_seconds": 2,
+        "agent": {"name": "claude-code", "budget_seconds": 30},
     },
 }
+PREPARED = {"ok": True, "stage": "prepare", "reason": "submission prepared"}
+BOUND = {"id": "frozen-profile", "question_ids": ["quality-letter"], "min_correct": 1}
 
 
 def rows():
     return [
         {
             "id": "quality-letter",
-            "model": "C2",
+            "model": TASK["model"],
             "evaluation": json.dumps({"method": "letter", "answer": "B"}),
             "requests": [
                 {
@@ -52,16 +57,54 @@ def rows():
     ]
 
 
-def submission(tmp_path):
-    folder = tmp_path / "submission"
-    folder.mkdir()
-    for name in ("install.sh", "launch.sh"):
-        (folder / name).write_text("#!/bin/bash\nexit 0\n")
-    return folder
+def inputs(tmp_path):
+    source = tmp_path / "submission"
+    source.mkdir()
+    (source / "install.sh").write_text(
+        "#!/bin/bash\nset -eu\n"
+        'printf "#!/bin/bash\\nexit 0\\n" > "./server.launch"\n'
+        'chmod +x "./server.launch"\n'
+        'printf "%s\\n" "/models/target" > ./installed-checkpoint\n'
+    )
+    data = tmp_path / "data"
+    Dataset.from_list(rows()).save_to_disk(str(data))
+    selected = tmp_path / "reference.json"
+    selected.write_text(json.dumps({"baseline": "freetoken", "args": [], "env": {}}))
+    return {
+        **TASK,
+        "reference": str(selected),
+        "candidate": {
+            "submission": str(source),
+            "launch": str(source / "server.launch"),
+        },
+        "inputs": {"private": str(data), "quality": str(data)},
+    }
 
 
-PREPARED = {"ok": True, "stage": "prepare", "reason": "submission prepared"}
-REVIEWED = {"ok": True}
+@pytest.fixture(autouse=True)
+def boundaries(tmp_path, monkeypatch):
+    for name, folder in (
+        ("STATE", "state"),
+        ("REFERENCE", "reference"),
+        ("RUBRIC", "rubric"),
+        ("REVIEW", "review"),
+    ):
+        monkeypatch.setattr(verifier, name, tmp_path / folder)
+    monkeypatch.setattr(verifier, "CANDIDATE_UID", None)
+    # UID and immutable-path enforcement are exercised in production-container tests.
+    monkeypatch.setattr(access, "seal_submission", lambda _: None)
+    monkeypatch.setattr(access, "readonly", lambda _: None)
+    monkeypatch.setattr(access, "reset_runtime", lambda _: tmp_path)
+
+    async def install(task, selection, out):
+        (verifier.REFERENCE / "baselines").mkdir(parents=True, exist_ok=True)
+        return "/models/target"
+
+    async def stopped():
+        return None
+
+    monkeypatch.setattr(verifier, "install_reference", install)
+    monkeypatch.setattr(verifier, "stop_runtime_users", stopped)
 
 
 async def reply(writer, *, valid=True):
@@ -85,448 +128,368 @@ def backend(name, endpoint, opened, closed):
     def factory(stage):
         managed = TrackedServer(None, endpoint, health_timeout=2)
         managed.stage = stage
-        opened.append((name, stage, managed))
+        opened.append((name, stage))
         return managed
 
-    return Backend(name, request_fields("C2"), factory)
+    return Backend(name, request_fields(TASK["model"]), factory)
 
 
-def test_passing_gate_uses_root_preparation_and_fresh_servers(tmp_path, monkeypatch):
-    reference = {"throughput": 10, "ttft_mean": 2}
-    assert rewards(reference, {"throughput": 20, "ttft_mean": 1}) == {
-        "throughput": 50,
-        "ttft": 50,
-    }
-    assert rewards(reference, {"throughput": 5, "ttft_mean": 4}) == {
-        "throughput": 0,
-        "ttft": 0,
-    }
-    source, out = submission(tmp_path), tmp_path / "results"
-    opened, closed, operations = [], [], []
-    monkeypatch.setattr(verifier, "RUBRIC", tmp_path / "rubric")
-    monkeypatch.setattr(verifier, "REVIEW", tmp_path / "review")
-    monkeypatch.setattr(verifier, "STATE", tmp_path / "private-state")
-    monkeypatch.setattr(verifier, "VERIFIER", out)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only-reviewer-secret")
-    monkeypatch.setenv("UNRELATED_PROVIDER_KEY", "test-only-coding-secret")
-    # Preparation inherits the verifier UID; the real Harbor test asserts UID 0.
-    environment = verifier.runtime_environment()
-    assert environment["HOME"] == "/root"
-    assert environment["USER"] == environment["LOGNAME"] == "root"
-    assert "ANTHROPIC_API_KEY" not in environment and "UNRELATED_PROVIDER_KEY" not in environment
-    assert asyncio.run(verifier.convert(source, "/models/source", tmp_path / "optional.log")) == {
+def saved_reference():
+    return {
         "ok": True,
-        "skipped": True,
+        "baseline": "freetoken",
+        "checkpoint": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+        "bench": {
+            "valid": True,
+            "throughput": 10,
+            "ttft_mean": 2,
+            "records": [
+                {
+                    "ok": True,
+                    "t_send": 0,
+                    "t_first": 2,
+                    "t_last": 3,
+                    "t_end": 4,
+                    "output_tokens": 10,
+                }
+            ],
+            "warmup": {},
+        },
     }
-    (source / "convert_weight.sh").write_text(
-        '#!/bin/bash\nset -eu\nmkdir -p "$WEIGHTS" "$RUNTIME"\n'
-        'echo "convert:$(id -u):$CHECKPOINT" > "$RUNTIME/order.txt"\n'
-        'echo converted > "$WEIGHTS/checkpoint"\n'
-    )
-    (source / "install.sh").write_text(
-        '#!/bin/bash\nset -eu\ntest -f "$WEIGHTS/checkpoint"\n'
-        'echo "install:$(id -u):$CHECKPOINT" >> "$RUNTIME/order.txt"\n'
-    )
 
-    process = verifier._process
 
-    async def image_preparation(command, **settings):
-        if command[1] != "/opt/eval/images/prepare.sh":
-            return await process(command, **settings)
-        operations.append("image inputs")
-        assert command[2:] == [str(source), str(verifier.RUBRIC), str(verifier.REVIEW)]
-        assert "user" not in settings and "group" not in settings
-        verifier.REVIEW.mkdir()
-        return 0
-
-    monkeypatch.setattr(verifier, "_process", image_preparation)
-    task_path = tmp_path / "task.json"
-    task_path.write_text(
-        json.dumps({**PREPARATION_TASK, "candidate": {"launch": str(source / "launch.sh")}})
-    )
-    assert verifier.main(["--stage", "prepare", "--task", str(task_path)]) == 0
-    prepared = json.loads((verifier.STATE / "prepare.json").read_text())
-    assert prepared["ok"] and prepared["access"] == {"exit_code": 0}
-    assert json.loads((out / "report.json").read_text()) == prepared
-    assert json.loads((out / "reward.json").read_text()) == {"reward": 1}
+def test_install_review_quality_reference_candidate_keep_the_shared_target(tmp_path, monkeypatch):
+    task = inputs(tmp_path)
+    source, out = Path(task["candidate"]["submission"]), tmp_path / "results"
+    shared = tmp_path / "target.safetensors"
+    shared.write_bytes(b"unchanged fixed target fixture")
+    opened, closed = [], []
 
     async def scenario():
-        async def respond(reader, writer, body):
+        prepared = await verifier.prepare_submission(task, source, out)
+        assert prepared["ok"]
+        assert not verifier.REFERENCE.exists()  # No baseline weights during candidate setup.
+        rubric = verifier.RUBRIC / "prompt.txt"
+        expected_prompt = rubric.read_text()
+        rubric.write_text("obsolete reviewer instructions")
+        installed = source / "installed-checkpoint"
+        installed_at = installed.stat().st_mtime_ns
+        assert await verifier.prepare_submission(task, source, out) == prepared
+        assert rubric.read_text() == expected_prompt
+        assert installed.stat().st_mtime_ns == installed_at
+        assert not (verifier.STATE / "report-space.reserve").exists()
+        assert (source / "installed-checkpoint").read_text().strip() == "/models/target"
+        assert "obtain_weight" not in prepared and (verifier.RUBRIC / "prompt.txt").is_file()
+
+        async def respond(_reader, writer, _body):
             await reply(writer)
 
-        async with server(respond) as (reference_endpoint, reference_requests):
-            async with server(respond) as (candidate_endpoint, candidate_requests):
-                report = await evaluate(
-                    TASK,
-                    rows(),
-                    rows(),
-                    backend("reference", reference_endpoint, opened, closed),
-                    backend("candidate", candidate_endpoint, opened, closed),
-                    out=out,
-                    prepared=prepared,
-                    reviewed=REVIEWED,
-                )
-                assert len(reference_requests) == len(candidate_requests) == 3
-                assert reference_requests == candidate_requests
-        return report
+        async with server(respond) as (endpoint, requests):
+            candidate = backend("candidate", endpoint, opened, closed)
+            gate = await pre_run(rows(), BOUND, candidate)
+            assert gate["ok"] and gate["quality"]["bound"]["correct"] == 1
+            assert not verifier.REFERENCE.exists()  # Failed gates never acquire a reference.
+            monkeypatch.setattr(
+                verifier, "_backend", lambda *a, **k: backend("freetoken", endpoint, opened, closed)
+            )
+            assert (await verifier.prepare_reference(task, source, out))["ok"]
+
+            async def no_downloads(*args):
+                raise AssertionError("offline timing must not install or acquire reference assets")
+
+            monkeypatch.setattr(verifier, "install_reference", no_downloads)
+            reference = await verifier.reference(task, source, out)
+            assert reference["ok"] and "quality" not in reference
+            assert await verifier.reference(task, source, out) == reference
+            assert (await verifier.prepare_reference(task, source, out))["ok"]
+            report = await evaluate(
+                task,
+                rows(),
+                reference,
+                candidate,
+                out=out,
+                prepared=prepared,
+                reviewed={"ok": True},
+                quality_gate=gate,
+            )
+            assert len(requests) == 5  # One quality, then warmup + one timed row on each server.
+            return report
 
     report = asyncio.run(scenario())
-    assert report["outcome"] == "passed" and report["pre_run"]["ok"] is True
-    assert report["bench"]["skipped"] is False
-    assert operations == ["image inputs"]
-    assert report["pre_run"]["convert"]["exit_code"] == 0
-    assert (tmp_path / "runtime/order.txt").read_text().splitlines() == [
-        f"convert:{os.geteuid()}:/models/source",
-        f"install:{os.geteuid()}:/models/source",
-    ]
-    assert [(name, stage) for name, stage, _ in opened] == [
-        ("reference", "quality"),
-        ("candidate", "quality"),
-        ("reference", "timed"),
-        ("candidate", "timed"),
-    ]
-    assert len({id(managed) for _, _, managed in opened}) == 4
-    assert closed == [(name, stage) for name, stage, _ in opened]
-    reference, candidate = report["bench"]["reference"], report["bench"]["candidate"]
-    assert reference["requests"] == candidate["requests"] == 1
-    assert reference["output_tokens"] == candidate["output_tokens"] == 2
-    assert report["rewards"] == {
-        "throughput": round(100 * max(0, 1 - reference["throughput"] / candidate["throughput"]), 2),
-        "ttft": round(100 * max(0, 1 - candidate["ttft_mean"] / reference["ttft_mean"]), 2),
-    }
+    assert (
+        report["outcome"] == "passed" and shared.read_bytes() == b"unchanged fixed target fixture"
+    )
+    assert verifier.REFERENCE.exists()
+    assert (
+        opened
+        == closed
+        == [("candidate", "quality"), ("freetoken", "timed"), ("candidate", "timed")]
+    )
     assert json.loads((out / "report.json").read_text()) == report
     assert json.loads((out / "reward.json").read_text()) == report["rewards"]
-    assert "throughput" in (out / "report.md").read_text().lower()
+    assert rewards("S-1", saved_reference()["bench"], {"throughput": 20, "ttft_mean": 1}) == {
+        "score": 50.0,
+    }
 
 
-def test_failed_candidate_install_skips_quality_and_bench(tmp_path, monkeypatch):
-    source, out = submission(tmp_path), tmp_path / "results"
+def test_reference_protocol_failure_keeps_target_and_has_no_candidate_score(tmp_path, monkeypatch):
+    task = inputs(tmp_path)
+    source, out = Path(task["candidate"]["submission"]), tmp_path / "results"
     opened, closed = [], []
+
+    async def scenario():
+        await verifier.prepare_submission(task, source, out)
+        calls = 0
+
+        async def respond(_reader, writer, _body):
+            nonlocal calls
+            calls += 1
+            await reply(writer, valid=calls == 1)
+
+        async with server(respond) as (endpoint, _):
+            monkeypatch.setattr(
+                verifier, "_backend", lambda *a, **k: backend("freetoken", endpoint, opened, closed)
+            )
+            assert (await verifier.prepare_reference(task, source, out))["ok"]
+            return await verifier.reference(task, source, out)
+
+    result = asyncio.run(scenario())
+    assert result["ok"] is None and "missing completion token usage" in result["reason"]
+    assert verifier.REFERENCE.exists() and not (verifier.STATE / "reference.json").exists()
+    assert opened == closed == [("freetoken", "timed")]
+    verifier.save_gate(out, result)
+    assert not (out / "reward.json").exists()
+
+
+def test_failed_installer_kills_its_children_and_stops_before_review(tmp_path):
+    task = inputs(tmp_path)
+    source, out = Path(task["candidate"]["submission"]), tmp_path / "results"
     (source / "install.sh").write_text(
         '#!/bin/bash\nsleep 60 >/dev/null 2>&1 &\necho "$!" > child.pid\nexit 7\n'
     )
-
     unrelated = subprocess.Popen(["sleep", "60"])
     try:
-        prepared = asyncio.run(verifier.prepare_submission(PREPARATION_TASK, source, out))
-        report = asyncio.run(
-            evaluate(
-                TASK,
-                rows(),
-                rows(),
-                backend("reference", "http://127.0.0.1:1", opened, closed),
-                backend("candidate", "http://127.0.0.1:1", opened, closed),
-                out=out,
-                prepared=prepared,
-                reviewed={"ok": None},
-            )
-        )
-        assert unrelated.poll() is None, "cleanup must not kill other root-owned processes"
+        result = asyncio.run(verifier.prepare_submission(task, source, out))
+        assert result["ok"] is False and result["install"]["exit_code"] == 7
+        assert not verifier.REFERENCE.exists()
+        assert not (verifier.STATE / "report-space.reserve").exists()
+        assert not (verifier.STATE / "install.json").exists() and not verifier.RUBRIC.exists()
+        assert unrelated.poll() is None
         child = Path("/proc") / (source / "child.pid").read_text().strip() / "stat"
         assert not child.exists() or child.read_text().split()[2] == "Z"
     finally:
         unrelated.terminate()
         unrelated.wait(timeout=2)
-    assert report["outcome"] == "candidate_failure"
-    assert report["pre_run"]["stage"] == "install" and report["pre_run"]["ok"] is False
-    assert report["pre_run"]["install"]["exit_code"] == 7
-    assert report["bench"]["skipped"] is True and not opened and not closed
-    assert report["rewards"] == {"throughput": 0, "ttft": 0}
-    assert json.loads((out / "reward.json").read_text()) == report["rewards"]
+    verifier.save_gate(out, result)
+    assert json.loads((out / "reward.json").read_text()) == {"reward": 0}
 
-    # Constructing a candidate must not read an absent or pre-install launcher.
-    monkeypatch.setattr(verifier, "runtime_environment", lambda: {"HOME": str(source)})
-    monkeypatch.setattr(verifier, "offline", nullcontext)
-    task = {
-        **TASK,
-        "category": "nvidia-cuda-x86",
-        "candidate": {"launch": str(source / "launch.sh")},
-        "evaluation": {"health_timeout_seconds": 1},
-        "assets": {"baselines": {"ollama": {"checkpoint": "mapped-tag"}}},
-    }
-    (source / "launch.sh").unlink()
-    candidate = _backend(task, "candidate", {}, out, reference={"baseline": "ollama"})
-    missing_preparation = asyncio.run(verifier.prepare_submission(task, source, out))
-    missing = asyncio.run(
+
+@pytest.mark.parametrize("workload", ["S-1", "S-N"])
+def test_bad_candidate_timing_and_wrong_port_stop_with_zero_rewards(tmp_path, workload):
+    task = {**TASK, "workload": workload}
+    opened, closed = [], []
+    out = tmp_path / "results"
+
+    async def scenario():
+        calls = 0
+
+        async def respond(_reader, writer, _body):
+            nonlocal calls
+            calls += 1
+            await reply(writer, valid=calls == 1)
+
+        async with server(respond) as (endpoint, _):
+            return await evaluate(
+                task,
+                (
+                    [dict(rows()[i % len(rows())], id=f"item-{i}") for i in range(8)]
+                    if workload == "S-N"
+                    else rows()
+                ),
+                saved_reference(),
+                backend("candidate", endpoint, opened, closed),
+                out=out,
+                prepared=PREPARED,
+                reviewed={"ok": True},
+                quality_gate={"ok": True, "stage": "quality"},
+            )
+
+    report = asyncio.run(scenario())
+    assert report["outcome"] == "candidate_failure" and report["rewards"] == verifier.zero_rewards(
+        workload
+    )
+    assert "missing completion token usage" in report["reason"]
+    assert closed == opened == [("candidate", "timed")]
+
+    def wrong_port(stage):
+        raise StartupError("wrong port", ENDPOINT)
+
+    candidate = Backend("candidate", request_fields(TASK["model"]), wrong_port)
+    gate = asyncio.run(pre_run(rows(), BOUND, candidate))
+    failed = asyncio.run(
         evaluate(
             task,
             rows(),
-            rows(),
+            saved_reference(),
             candidate,
-            candidate,
-            out=out,
-            prepared=missing_preparation,
-            reviewed=REVIEWED,
-        )
-    )
-    assert missing["pre_run"]["stage"] == "static" and missing["rewards"] == report["rewards"]
-
-    @asynccontextmanager
-    async def inspected_server(launch, endpoint, **settings):
-        assert endpoint == ENDPOINT and "user" not in settings and "guard" not in settings
-        yield SimpleNamespace(launch=launch)
-
-    async def checkpoint(stage):
-        async with candidate.server(stage) as managed:
-            return managed.launch.checkpoint
-
-    monkeypatch.setattr(verifier, "Server", inspected_server)
-    (source / "launch.sh").write_text('exec engine serve "$CHECKPOINT" --port 8000\n')
-    assert asyncio.run(checkpoint("quality")) == "mapped-tag"
-    assert candidate.policy == request_fields("C2", "ollama")
-    (source / "launch.sh").write_text("exec engine serve /workspace/quantized --port 8000\n")
-    assert asyncio.run(checkpoint("timed")) is None
-    assert candidate.policy == request_fields("C2", "candidate")
-
-
-def test_reference_timed_failure_removes_stale_reward_and_stops_evaluation(tmp_path):
-    out = tmp_path / "results"
-    out.mkdir()
-    (out / "reward.json").write_text('{"throughput": 100, "ttft": 100}')
-    opened, closed = [], []
-
-    async def scenario():
-        reference_calls = 0
-
-        async def reference_reply(reader, writer, body):
-            nonlocal reference_calls
-            reference_calls += 1
-            await reply(writer, valid=reference_calls < 3)
-
-        async def candidate_reply(reader, writer, body):
-            await reply(writer)
-
-        async with server(reference_reply) as (reference_endpoint, reference_requests):
-            async with server(candidate_reply) as (candidate_endpoint, candidate_requests):
-                report = await evaluate(
-                    TASK,
-                    rows(),
-                    rows(),
-                    backend("reference", reference_endpoint, opened, closed),
-                    backend("candidate", candidate_endpoint, opened, closed),
-                    out=out,
-                    prepared=PREPARED,
-                    reviewed=REVIEWED,
-                )
-                assert len(reference_requests) == 3 and len(candidate_requests) == 1
-        return report
-
-    report = asyncio.run(scenario())
-    assert report["outcome"] == "infrastructure_error" and report["pre_run"]["ok"] is True
-    assert "rewards" not in report and not (out / "reward.json").exists()
-    assert [(name, stage) for name, stage, _ in opened] == [
-        ("reference", "quality"),
-        ("candidate", "quality"),
-        ("reference", "timed"),
-    ]
-    assert closed == [(name, stage) for name, stage, _ in opened]
-    assert "missing completion token usage" in report["reason"]
-    assert json.loads((out / "report.json").read_text())["outcome"] == "infrastructure_error"
-
-    def unavailable(stage):
-        raise StartupError("reference exited", ENDPOINT)
-
-    unavailable_reference = Backend("reference", request_fields("C2"), unavailable)
-    failed = asyncio.run(
-        evaluate(
-            TASK,
-            rows(),
-            rows(),
-            unavailable_reference,
-            unavailable_reference,
             out=out,
             prepared=PREPARED,
-            reviewed=REVIEWED,
+            reviewed={"ok": True},
+            quality_gate=gate,
         )
     )
-    assert failed["pre_run"]["stage"] == "startup"
-    assert failed["outcome"] == "infrastructure_error" and failed["bench"]["skipped"]
-    assert "rewards" not in failed and not (out / "reward.json").exists()
+    assert failed["pre_run"]["stage"] == "startup" and failed["bench"]["skipped"]
+    assert failed["rewards"] == verifier.zero_rewards(workload)
 
 
-def test_candidate_timed_protocol_failure_has_zero_rewards_and_cleanup(tmp_path, monkeypatch):
-    source, out = submission(tmp_path), tmp_path / "results"
-    opened, closed = [], []
+def test_resume_reuses_a_completed_reviewer_decision(tmp_path, monkeypatch):
+    from eval.verify import run as verifier
 
-    async def scenario():
-        candidate_calls = 0
+    decision = {"ok": True, "rules": {"selected_model": True}}
+    monkeypatch.setattr(verifier, "REVIEW", tmp_path)
+    (tmp_path / "review.json").write_text(json.dumps(decision))
 
-        async def reference_reply(reader, writer, body):
-            await reply(writer)
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("A finished review must not start another agent")
 
-        async def candidate_reply(reader, writer, body):
-            nonlocal candidate_calls
-            candidate_calls += 1
-            await reply(writer, valid=candidate_calls < 3)
+    monkeypatch.setattr(verifier, "_process", unexpected)
+    assert asyncio.run(verifier.review_rules(tmp_path / "submission")) == decision
 
-        async with server(reference_reply) as (reference_endpoint, reference_requests):
-            async with server(candidate_reply) as (candidate_endpoint, candidate_requests):
-                report = await evaluate(
-                    TASK,
-                    rows(),
-                    rows(),
-                    backend("reference", reference_endpoint, opened, closed),
-                    backend("candidate", candidate_endpoint, opened, closed),
-                    out=out,
-                    prepared=PREPARED,
-                    reviewed=REVIEWED,
-                )
-                assert len(reference_requests) == len(candidate_requests) == 3
-        return report
 
-    report = asyncio.run(scenario())
-    assert report["outcome"] == "candidate_failure" and report["pre_run"]["ok"] is True
-    assert report["bench"]["reference"]["valid"] and report["bench"]["skipped"] is False
-    assert report["rewards"] == {"throughput": 0, "ttft": 0}
-    assert json.loads((out / "reward.json").read_text()) == report["rewards"]
-    assert len(opened) == 4 and closed == [(name, stage) for name, stage, _ in opened]
-    assert "missing completion token usage" in report["reason"]
+@pytest.mark.parametrize("separate", [False, True])
+def test_reference_acquisition_uses_its_mapping_and_reuses_identical_target(
+    tmp_path, monkeypatch, separate
+):
+    from types import SimpleNamespace
 
-    async def startup_case(error):
-        async def respond(reader, writer, body):
-            await reply(writer)
-
-        def unavailable(stage):
-            raise error
-
-        async with server(respond) as (endpoint, received):
-            return await evaluate(
-                TASK,
-                rows(),
-                rows(),
-                backend("reference", endpoint, [], []),
-                Backend("candidate", request_fields("C2"), unavailable),
-                out=out,
-                prepared=PREPARED,
-                reviewed=REVIEWED,
-            )
-
-    failed = asyncio.run(startup_case(StartupError("wrong port", ENDPOINT)))
-    assert failed["outcome"] == "candidate_failure" and failed["pre_run"]["stage"] == "startup"
-    assert failed["bench"]["skipped"] and failed["rewards"] == {"throughput": 0, "ttft": 0}
-    unavailable = asyncio.run(startup_case(verifier.Infrastructure("firewall unavailable")))
-    assert unavailable["outcome"] == "infrastructure_error"
-    assert "rewards" not in unavailable and not (out / "reward.json").exists()
-
-    # An incomplete offline boundary is infrastructure failure, and must roll back.
+    task = inputs(tmp_path)
+    canonical = task["target"]["source"]
+    selected = {"baseline": "freetoken", "args": [], "env": {}}
+    task["assets"]["baselines"] = {"freetoken": "owner/reference-GGUF" if separate else canonical}
     calls = []
+    protected = []
 
-    def execute(command, **settings):
-        calls.append(command)
-        assert settings["check"]
-        if command[:2] == ["ip6tables", "-I"]:
-            raise subprocess.CalledProcessError(1, command)
-        return SimpleNamespace(returncode=0)
+    def workspace():
+        verifier.REFERENCE.mkdir()
 
-    monkeypatch.setattr(verifier.subprocess, "run", execute)
-    with pytest.raises(verifier.Infrastructure, match="offline"):
-        with verifier.offline():
-            pytest.fail("an incomplete firewall must not start measurement")
-    assert [call[:2] for call in calls] == [
-        ["iptables", "-I"],
-        ["ip6tables", "-I"],
-        ["iptables", "-D"],
-    ]
-    assert all("owner" not in call and "pkill" not in call for call in calls)
+    def acquire(source, destination):
+        calls.append((source, destination))
+        destination.mkdir(parents=True)
+        (destination / "model.gguf").write_text("reference-only fixture")
+        return SimpleNamespace(checkpoint=str(destination))
 
-    # This unit substitutes the subprocess boundary only. Live tests run Claude.
-    monkeypatch.setattr(verifier, "RUBRIC", tmp_path / "rubric")
-    monkeypatch.setattr(verifier, "REVIEW", tmp_path / "review")
-    verifier.REVIEW.mkdir()
-    verifier.judge.write_review(PREPARATION_TASK, source, verifier.RUBRIC)
-    monkeypatch.setenv("HOME", str(tmp_path / "judge-home"))
-    monkeypatch.setenv("USER", "judge")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-only-native-token")
-    exit_code = 1
-    executions = []
+    async def installed(command, **kwargs):
+        assert kwargs["user"] == verifier.REFERENCE_UID
+        return 0
 
-    async def native_process(command, **settings):
-        executions.append(command)
-        assert command[:6] == [
-            sys.executable,
-            "-I",
-            "-m",
-            "rewardkit",
-            str(verifier.RUBRIC),
-            "--workspace",
-        ]
-        assert command[6] in (str(source), "/workspace/submission")
-        assert command[7:] == ["--output", str(verifier.REVIEW / "reward.json")]
-        assert settings["cwd"] == Path(os.environ["HOME"]) and settings["timeout"] == 30
-        assert settings["environment"]["USER"] == "judge"
-        assert settings["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == "test-only-native-token"
-        assert "user" not in settings and "group" not in settings
-        if exit_code == 0:
-            criteria = tomllib.loads((verifier.RUBRIC / "rules.toml").read_text())["criterion"]
-            (verifier.REVIEW / "reward.json").write_text('{"reward": 0}')
-            (verifier.REVIEW / "reward-details.json").write_text(
-                json.dumps(
-                    {
-                        "reward": {
-                            "kind": "agent",
-                            "criteria": [
-                                {
-                                    "name": item["name"],
-                                    "value": 0 if number == 0 else 1,
-                                    "reasoning": "server.py:9 returns recorded answers."
-                                    if number == 0
-                                    else "Rule passes.",
-                                }
-                                for number, item in enumerate(criteria)
-                            ],
-                        }
-                    }
-                )
-            )
-        return exit_code
+    monkeypatch.setattr(access, "reference_workspace", workspace)
+    monkeypatch.setattr(access, "readonly", lambda path: protected.append(path))
+    monkeypatch.setattr("eval.models.prepare_asset", acquire)
+    monkeypatch.setattr(verifier, "_process", installed)
+    result = asyncio.run(install_reference(task, selected, tmp_path / "logs"))
+    if separate:
+        destination = verifier.REFERENCE / "weights/target"
+        assert result == str(destination)
+        assert calls == [("owner/reference-GGUF", destination)]
+        assert protected == [destination]
+    else:
+        assert result == "/models/target" and not calls and not protected
+    assert task["target"]["source"] == canonical
 
-    monkeypatch.setattr(verifier, "_process", native_process)
-    forbidden = Backend("unstarted", request_fields("C2"), lambda stage: pytest.fail(stage))
 
-    async def review_gate():
-        reviewed = await verifier.review_rules(source)
-        return await evaluate(
-            TASK,
-            rows(),
-            rows(),
-            forbidden,
-            forbidden,
-            out=out,
-            prepared=PREPARED,
-            reviewed=reviewed,
+def test_coding_export_preserves_source_without_native_state(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "install.sh").write_text("#!/bin/bash\n")
+    (project / "server.py").write_text("print('serving')\n")
+    state = tmp_path / "runtime"
+    state.mkdir()
+    (state / "installed.so").write_text("generated runtime")
+    (state / "operation.json").write_text("replay checkpoint")
+    target = tmp_path / "published"
+    verifier.collect_submission(target, project)
+    assert {path.name for path in target.iterdir()} == {"install.sh", "server.py"}
+    assert (state / "installed.so").is_file()
+    assert (target / "server.py").read_text() == (project / "server.py").read_text()
+
+
+def test_failed_coding_export_cannot_publish_a_stale_submission(tmp_path, monkeypatch):
+    project, target = tmp_path / "project", tmp_path / "published"
+    project.mkdir()
+    target.mkdir()
+    (target / "install.sh").write_text("stale submission")
+
+    def interrupted(*args, **kwargs):
+        raise OSError("source transfer interrupted")
+
+    monkeypatch.setattr(verifier.shutil, "copytree", interrupted)
+    with pytest.raises(OSError, match="transfer interrupted"):
+        verifier.collect_submission(target, project)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        (
+            {"TRITON_CACHE_DIR": "/workspace/runtime/search/cache/triton", "OMP_NUM_THREADS": "8"},
+            {"TRITON_CACHE_DIR": "{reference}/cache/triton", "OMP_NUM_THREADS": "8"},
+        ),
+        ({}, {}),
+        ({"CUDA_CACHE_PATH": "/mnt/cache/cuda"}, {"CUDA_CACHE_PATH": "/mnt/cache/cuda"}),
+        (
+            {"ROOT": "/workspace/runtime/search", "OTHER": "/workspace/runtime/search-other/cache"},
+            {"ROOT": "{reference}", "OTHER": "/workspace/runtime/search-other/cache"},
+        ),
+    ],
+)
+def test_reference_relocates_only_search_runtime_environment(
+    tmp_path, monkeypatch, values, expected
+):
+    observed = []
+    params = {"args": ["--max-running-requests", "8"], "env": dict(values)}
+
+    class StartedServer:
+        def __init__(self, launch, *args, **kwargs):
+            observed.append(launch.prepare())
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr(verifier, "Server", StartedServer)
+
+    async def scenario():
+        backend = verifier._backend(
+            TASK, "freetoken", params, tmp_path, checkpoint="/models/reference"
         )
+        async with backend.server("measure"):
+            pass
 
-    provider_failure = asyncio.run(review_gate())
-    assert provider_failure["pre_run"]["rules"]["ok"] is None
-    assert provider_failure["pre_run"]["rules"]["exit_code"] == 1
-    assert (
-        provider_failure["outcome"] == "infrastructure_error"
-        and provider_failure["bench"]["skipped"]
+    asyncio.run(scenario())
+    command, environment = observed[0]
+    assert command[-2:] == params["args"]
+    assert environment == {
+        **{key: value.format(reference=verifier.REFERENCE) for key, value in expected.items()},
+        "CHECKPOINT": "/models/reference",
+    }
+    assert params["env"] == values
+
+
+def test_failed_online_reference_preparation_has_no_candidate_score(tmp_path, monkeypatch):
+    task = inputs(tmp_path)
+    out = tmp_path / "results"
+
+    async def failed(*args):
+        raise verifier.Infrastructure("reference acquisition failed")
+
+    monkeypatch.setattr(verifier, "install_reference", failed)
+    result = asyncio.run(
+        verifier.prepare_reference(task, Path(task["candidate"]["submission"]), out)
     )
-    assert "rewards" not in provider_failure and not (out / "reward.json").exists()
-    exit_code = 0
-    rule_violation = asyncio.run(review_gate())
-    assert rule_violation["pre_run"]["stage"] == "rules"
-    assert rule_violation["pre_run"]["rules"]["ok"] is False
-    assert rule_violation["pre_run"]["rules"]["complete"]
-    assert rule_violation["outcome"] == "candidate_failure" and rule_violation["bench"]["skipped"]
-    assert rule_violation["rewards"] == {"throughput": 0, "ttft": 0}
-    assert len(executions) == 2
-    verifier.REVIEW.chmod(0o700)
-    transcript = verifier.REVIEW / "rules.log"
-    transcript.write_text("Native reviewer evidence.\n")
-    transcript.chmod(0o600)
-    monkeypatch.setattr(verifier, "VERIFIER", tmp_path / "native-review")
-    assert (
-        verifier.main(["--stage", "review", "--task", str(tmp_path / "unreadable-private.json")])
-        == 0
-    )
-    durable = json.loads((verifier.REVIEW / "review.json").read_text())
-    assert durable["ok"] is False and durable["complete"]
-    assert json.loads((verifier.VERIFIER / "report.json").read_text()) == durable
-    assert json.loads((verifier.VERIFIER / "reward.json").read_text()) == {"reward": 0}
-    exported = verifier.VERIFIER / "rules.log"
-    assert exported.read_text() == transcript.read_text()
-    assert exported.stat().st_mode & 0o004
-    assert not any(path.is_dir() for path in verifier.VERIFIER.iterdir())
-    assert verifier.REVIEW.stat().st_mode & 0o777 == 0o700
+    assert result["ok"] is None and result["stage"] == "reference-prepare"
+    verifier.save_gate(out, result)
+    assert not (out / "reward.json").exists()
+    assert not (verifier.STATE / "reference.json").exists()

@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
+import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import TABLES
 from .config import model as get_model
-from .launch import Launch
+
+RECIPES = Path("/opt/eval/baselines")
+WORKSPACE = Path("/workspace/runtime/search/baselines")
+
+FIXED_OPTIONS = {
+    "llama.cpp": frozenset(
+        {"-m", "-a", "--alias", "-mu", "--model-url", "-hf", "--hf-repo", "-hff", "--hf-file"}
+    ),
+    "vllm": frozenset({"--served-model-names"}),
+    "ktransformers": frozenset({"--model-path", "--kt-weight-path"}),
+    "ktransformers-dsv4": frozenset({"--model-path", "--kt-weight-path"}),
+}
+FIXED_ENV = {
+    "ollama": frozenset({"OLLAMA_HOST", "OLLAMA_MODELS", "OLLAMA_NOPRUNE", "OLLAMA_NO_CLOUD"}),
+}
 
 
 @dataclass(frozen=True)
@@ -17,7 +35,6 @@ class BaselineMapping:
     category: str
     model: str
     baseline: str
-    source_model_checkpoint: str
     checkpoint: str
 
     @property
@@ -46,6 +63,46 @@ def needed(category: str, models: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
+def install(
+    task: dict,
+    names: tuple[str, ...] | None = None,
+    *,
+    recipes: Path = RECIPES,
+    workspace: Path = WORKSPACE,
+    environment: dict[str, str] | None = None,
+) -> None:
+    """Install small trusted recipes in the current phase's writable workspace.
+
+    The caller already runs as search, agent or verifier. No model bytes are
+    copied, and a completed installation is reused when a local step resumes.
+    """
+    for name in task["assets"]["baselines"] if names is None else names:
+        destination = workspace / task["device_category"] / name
+        complete = destination / ".installed"
+        if complete.is_file():
+            continue
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.mkdir(parents=True)
+        recipe = recipes / task["device_category"] / name
+        for source in (recipe / "install.sh", recipe / "launch.sh", *recipe.glob("*.patch")):
+            target = destination / source.name
+            shutil.copyfile(source, target)
+            target.chmod(0o644 if source.suffix == ".patch" else 0o755)
+        with (destination / "install.log").open("wb") as log:
+            result = subprocess.run(
+                ["/bin/bash", str(destination / "install.sh")],
+                cwd=destination,
+                env=environment,
+                stdout=log,
+                stderr=log,
+            )
+        if result.returncode:
+            detail = (destination / "install.log").read_text(errors="replace")
+            raise RuntimeError(f"{name} installation exited {result.returncode}:\n{detail}")
+        complete.touch()
+
+
 def resolve_launch(
     script: Path,
     model: str,
@@ -54,37 +111,45 @@ def resolve_launch(
     task: dict | None = None,
     reference: dict | None = None,
 ) -> tuple[str, str | None]:
-    """Resolve a template within the selected model/workload task context.
+    """Recognize authored baseline folders; completed candidate scripts own their weights.
 
-    A complete candidate owns its weights and needs no mapping. A baseline folder
-    identifies its engine/category; a copied template uses the task's selected
-    reference. Public replay reads that selection from its working directory's
-    reference.json. Private verification passes the protected task/selection.
+    Public experiments can supply their acquired path through CHECKPOINT. Otherwise
+    a baseline's checkpoint source comes from its model/category mapping. Trusted
+    verification passes an acquired local path directly to Launch.
     """
-    needs_checkpoint = Launch(script).needs_checkpoint
+    script = script.resolve()
     if script.parent.parent.name == "baselines":
-        engine, category = script.parent.name, script.parents[2].name
-    elif needs_checkpoint:
-        reference = reference or json.loads(Path("reference.json").read_text())
-        engine = reference["baseline"]
-        category = task["category"] if task is not None else reference["category"]
+        engine, category = script.parent.name, script.parent.parent.parent.name
+    elif script.parent.parent.parent.name == "baselines":
+        engine, category = script.parent.name, script.parent.parent.name
     else:
-        return "candidate", None
-    if not needs_checkpoint:
-        return engine, None
-    if reference is not None and reference.get("baseline") == engine and "checkpoint" in reference:
-        return engine, reference["checkpoint"]
-    if task is not None:
-        return engine, task["assets"]["baselines"][engine]["checkpoint"]
-    if reference is not None:
-        return engine, reference["checkpoint"]
-    baseline = mapping(category, model, engine)
-    checkpoint = (
-        "/models/source"
-        if baseline.checkpoint == baseline.source_model_checkpoint
-        else baseline.checkpoint
-    )
-    mounted = Path("/models/baselines") / engine
-    if checkpoint != "/models/source" and mounted.is_dir():
-        checkpoint = str(mounted)
+        return "candidate", "/models/target" if script.name == "server.launch" else None
+    checkpoint = os.environ.get("CHECKPOINT")
+    if checkpoint is None:
+        checkpoint = (
+            task["assets"]["baselines"][engine]
+            if task is not None
+            else mapping(category, model, engine).checkpoint
+        )
     return engine, checkpoint
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Install selected recipes when an agent or trusted verifier requests them."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", type=Path, default=Path("/var/lib/local-eval/task.json"))
+    parser.add_argument("--baseline")
+    parser.add_argument("--workspace", type=Path, default=WORKSPACE)
+    parser.add_argument("--recipes", type=Path, default=RECIPES)
+    args = parser.parse_args(argv)
+    install(
+        json.loads(args.task.read_text()),
+        (args.baseline,) if args.baseline else None,
+        workspace=args.workspace,
+        recipes=args.recipes,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

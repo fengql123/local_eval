@@ -1,8 +1,8 @@
-from eval.request_policy import pool_of, request_fields
+from eval.request_policy import matches_workload, pool_of, request_fields
 
 
 def test_candidate_request_uses_model_policy_and_openai_endpoint():
-    policy = request_fields("C2")
+    policy = request_fields("Qwen3.6-35B-A3B")
     body = policy.request([{"role": "user", "content": "Explain caching."}], workload="S-1")
     assert (policy.api, policy.endpoint) == ("openai-chat", "/v1/chat/completions")
     assert body["model"] == "served"
@@ -14,7 +14,7 @@ def test_candidate_request_uses_model_policy_and_openai_endpoint():
 
 
 def test_ollama_request_keeps_openai_fields_and_applies_backend_overrides():
-    policy = request_fields("C2", "ollama")
+    policy = request_fields("Qwen3.6-35B-A3B", "ollama")
     body = policy.request([], workload="A-N", output_limit=12, served_model="baseline")
     assert policy.endpoint == "/v1/chat/completions"
     assert body["model"] == "baseline"
@@ -28,7 +28,7 @@ def test_ollama_request_keeps_openai_fields_and_applies_backend_overrides():
 
 
 def test_stream_usage_can_be_absent_or_report_zero_and_agentic_sampling_differs():
-    policy = request_fields("N3", "vllm")
+    policy = request_fields("DeepSeek-V4-Flash-0731", "vllm")
     assert policy.count({"choices": [{"delta": {"content": "Hello"}}], "usage": None}) is None
     assert policy.count({"usage": {"completion_tokens": 0}}) == 0
     assert policy.count({"usage": {"completion_tokens": 17}}) == 17
@@ -38,7 +38,7 @@ def test_stream_usage_can_be_absent_or_report_zero_and_agentic_sampling_differs(
 
 
 def test_request_changes_do_not_modify_recorded_data_or_future_requests():
-    policy = request_fields("C2", "ollama")
+    policy = request_fields("Qwen3.6-35B-A3B", "ollama")
     messages = [{"role": "user", "content": "Explain caching."}]
     tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
     body = policy.request(messages, workload="A-N", tools=tools)
@@ -50,3 +50,13 @@ def test_request_changes_do_not_modify_recorded_data_or_future_requests():
     assert tools[0]["function"]["name"] == "read_file"
     assert policy.fields("S-1")["chat_template_kwargs"]["enable_thinking"] is True
     assert policy.fields("S-1")["stream_options"]["include_usage"] is True
+
+
+def test_workload_memberships_keep_an_separate_and_support_raw_rows():
+    row = {"public": ["A-N"], "private": ["A-1"]}
+    assert matches_workload(row, "A-N")
+    assert not matches_workload(row, "A-1")
+    assert matches_workload(row, "A-1", scoped=True)
+    assert matches_workload(row, "S-1", scoped=True)
+    assert not matches_workload({"public": []}, "A-N")
+    assert matches_workload(row, "A-1", split="private")

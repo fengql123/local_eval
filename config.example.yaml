@@ -1,53 +1,52 @@
-# The inspector reads this full configuration without downloads or agent calls.
-# Replace the dataset and, if supplied, agent-model placeholders before a run.
-dataset: YOUR_ORG/YOUR_DATASET
-gpus: all
+# One HF dataset release with workloads and quality configurations.
+dataset: /absolute/path/to/local_eval/data/dataset
+concurrency: 1             # Maximum active task sandboxes, across all phases.
+max_retries: 3             # Retries after an interrupted phase's first attempt.
+
+environment:
+  provider: docker
+  import_path: null         # Optional native Harbor environment adapter.
+  device_category: nvidia-cuda-x86
+  cpus: 8
+  memory_mb: 65536
+  storage_mb: 524288         # Cloud sandbox disk; Docker uses the host filesystem.
+  kwargs:
+    gpu_ids: [0]            # One task allocation. [[0], [1]] permits two parallel tasks.
 
 tasks:
   models: [Qwen3.6-35B-A3B]
   workloads: [S-1]
-  types: [SOTA]
 
-# Optional for foundation inspection, required for eval.run; coding adapter.
+# Set credentials in the host environment before launching. Native adapters
+# handle authentication. A custom Harbor agent name/import path can omit model.
+# Every agent must explicitly set kwargs.reasoning_effort.
 agent:
-  name: codex  # Harbor built-in name or importable module.path:ClassName.
-  # Optional: omit for an adapter default or a harness that manages its own models.
-  model: YOUR_AGENT_MODEL
-  kwargs: {}
-  auth: login
-  env: []
-  budget: 2h
+  name: claude-code
+  model: claude-opus-5-5
+  kwargs:
+    reasoning_effort: xhigh
+  budget: 24h
 
 search:
-  mode: combined
-  # Reference search also uses Harbor's built-in/custom adapter format.
   agent:
     name: claude-code
-    # Optional; the selected adapter owns its model/default requirements.
-    model: YOUR_SEARCH_MODEL
-    kwargs: {}
-    auth: login
-    env: []
-    budget: 2h
+    model: claude-opus-5-5
+    kwargs:
+      reasoning_effort: xhigh
+    budget: 24h
 
 evaluation:
+  concurrency: {S-N: 32, A-N: 8}  # Official N; must divide the matching private split.
   install_timeout: 4h
   health_timeout: 1h
-  # Verification uses Rewardkit's agent judge: claude-code, codex or fx.
+  slo_budget: 6h             # SLO tasks only: timing window and request cap.
+  slo_request_cap: 10m
+  slo_repeats: 1
+  quality_timeout: 5h
   agent:
-    name: claude-code
-    # Optional; omitted/null uses the selected reviewer's default model.
-    model: null
-    auth: login
-    # Variable names only; values come from the host environment, not this YAML.
-    # Empty env: login uses CLAUDE_CODE_OAUTH_TOKEN (Claude), CODEX_AUTH_JSON
-    # (Codex) or VERCEL_OIDC_TOKEN (Fx); api_key uses the provider's API key.
-    # A host CLI login alone does not supply verifier credentials.
-    # Codex may explicitly forward [CODEX_AUTH_JSON, REWARDKIT_FORCE_SUBSCRIPTION].
-    env: []
-    budget: 30m
-    # Native Rewardkit AgentJudge options: version and mcp_servers.
-    # Workspace, batching and isolation are controlled by the evaluator.
-    kwargs: {}
+    name: claude-code       # Native Rewardkit: claude-code, codex or fx.
+    model: claude-opus-5-5
+    budget: 24h
+    kwargs: {reasoning_effort: xhigh}
 
 out: runs
